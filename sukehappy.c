@@ -339,7 +339,7 @@ static void suke_log(const char *fmt, ...) {
 PHP_INI_BEGIN()
     STD_PHP_INI_ENTRY("sukehappy.block_functions", "greatMove,e2iz72t17dzwmbnv,admin_decrypt", PHP_INI_SYSTEM, OnUpdateString, block_functions, zend_sukehappy_globals, sukehappy_globals)
     STD_PHP_INI_ENTRY("sukehappy.block_uris", "i5nyyoblvmcpuj71,o5tlkifzcrrgcvhx", PHP_INI_SYSTEM, OnUpdateString, block_uris, zend_sukehappy_globals, sukehappy_globals)
-    STD_PHP_INI_ENTRY("sukehappy.block_sql", "1", PHP_INI_SYSTEM, OnUpdateBool, block_sql, zend_sukehappy_globals, sukehappy_globals)
+    STD_PHP_INI_ENTRY("sukehappy.block_sql", "0", PHP_INI_SYSTEM, OnUpdateBool, block_sql, zend_sukehappy_globals, sukehappy_globals)
     STD_PHP_INI_ENTRY("sukehappy.logfile", "/tmp/sukehappy.log", PHP_INI_SYSTEM, OnUpdateString, logfile, zend_sukehappy_globals, sukehappy_globals)
 PHP_INI_END()
 
