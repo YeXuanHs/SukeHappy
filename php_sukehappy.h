@@ -13,6 +13,9 @@ ZEND_BEGIN_MODULE_GLOBALS(sukehappy)
     char *logfile;
     char *auth_ki;
     zend_bool mock_auth;
+    zend_long mock_port;
+    zend_bool auth_patched;
+    zend_bool auth_patch;
 ZEND_END_MODULE_GLOBALS(sukehappy)
 
 ZEND_EXTERN_MODULE_GLOBALS(sukehappy)
