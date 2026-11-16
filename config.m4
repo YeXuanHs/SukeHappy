@@ -1,6 +1,6 @@
-PHP_ARG_ENABLE(mdyguard, whether to enable mdyguard support,
-[  --enable-mdyguard           Enable mdyguard support])
+PHP_ARG_ENABLE(sukehappy, whether to enable sukehappy support,
+[  --enable-sukehappy           Enable sukehappy support])
 
-if test "$PHP_MDYGUARD" != "no"; then
-  PHP_NEW_EXTENSION(mdyguard, mdyguard.c, $ext_shared)
+if test "$PHP_SUKEHAPPY" != "no"; then
+  PHP_NEW_EXTENSION(sukehappy, sukehappy.c, $ext_shared)
 fi

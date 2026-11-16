@@ -34,12 +34,12 @@ jobs:
           phpize
           ./configure --with-php-config="$(which php-config)"
           make -j"$(nproc)"
-          ls -l modules/mdyguard.so
+          ls -l modules/sukehappy.so
 
       - name: Smoke test (blocklist works)
         run: |
           set -eux
-          php -d extension="$PWD/modules/mdyguard.so" -r '
+          php -d extension="$PWD/modules/sukehappy.so" -r '
             function greatMove(){ echo "SHOULD_NOT_PRINT\n"; }
             greatMove();
             echo "AFTER\n";
@@ -58,7 +58,7 @@ jobs:
       - name: Smoke test (SQL guard)
         run: |
           set -eux
-          EXT="$PWD/modules/mdyguard.so"
+          EXT="$PWD/modules/sukehappy.so"
           # CREATE/INSERT/SELECT 必须放行
           php -d extension="$EXT" -r '
             $p = new PDO("sqlite::memory:");
@@ -68,7 +68,7 @@ jobs:
           ' | tee sql1.txt
           grep -q "SQL_OK 1" sql1.txt
           # DROP 必须被拦
-          php -d extension="$EXT" -d mdyguard.block_sql=1 -r '
+          php -d extension="$EXT" -d sukehappy.block_sql=1 -r '
             $p = new PDO("sqlite::memory:");
             $p->exec("CREATE TABLE t(a int)");
             $p->exec("DROP TABLE t");
@@ -79,7 +79,7 @@ jobs:
             exit 1
           fi
           # INTO OUTFILE 必须被拦
-          php -d extension="$EXT" -d mdyguard.block_sql=1 -r '
+          php -d extension="$EXT" -d sukehappy.block_sql=1 -r '
             $p = new PDO("sqlite::memory:");
             $p->exec("SELECT 1 INTO OUTFILE \"x\"");
             echo "OUTFILE_PASSED\n";
@@ -101,16 +101,16 @@ jobs:
       - name: Version + ABI
         run: |
           php -i | grep -E 'PHP API|PHP Extension|Zend Extension|Thread Safety' || true
-          php -d extension="$PWD/modules/mdyguard.so" -r 'print_r(get_loaded_extensions());' | grep -i mdyguard
+          php -d extension="$PWD/modules/sukehappy.so" -r 'print_r(get_loaded_extensions());' | grep -i sukehappy
 
       - name: Rename artifact
         run: |
           ABI=$(php -r 'echo PHP_ZTS ? "zts" : "nts";')
           VER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
-          cp modules/mdyguard.so "mdyguard-${VER}-${ABI}-linux-x86_64.so"
+          cp modules/sukehappy.so "sukehappy-${VER}-${ABI}-linux-x86_64.so"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mdyguard-php${{ matrix.php }}
-          path: mdyguard-*-linux-x86_64.so
+          name: sukehappy-php${{ matrix.php }}
+          path: sukehappy-*-linux-x86_64.so
           if-no-files-found: error
