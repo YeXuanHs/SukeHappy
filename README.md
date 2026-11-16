@@ -49,6 +49,24 @@ sudo make install
 - 这是**缓解手段**，不是根治。根治要打官方补丁或替换掉含后门的加密文件。
 - 仅限用于你自己拥有/运维的站点。
 
+
+## 已验证
+
+在 PHP 7.4.33 (NTS) 上实测：
+
+| 用例 | 结果 |
+|---|---|
+| 加载扩展 | `mdyguard` 出现在 `get_loaded_extensions()` |
+| 普通代码 | 正常执行 |
+| 调用 `greatMove()` | 无任何输出，请求终止 |
+| 调用 `e2iz72t17dzwmbnv()` | 无任何输出，请求终止 |
+| 调用 `admin_decrypt()` | 无任何输出，请求终止 |
+| 不加载扩展（对照） | 正常执行，说明拦截确实来自本扩展 |
+| 自定义 `mdyguard.block_functions=myDanger` | 生效 |
+
+CI 每次构建都会跑同类冒烟测试（见 `.github/workflows/build.yml`），
+拦截失效会导致构建失败。
+
 ## License
 
 MIT
