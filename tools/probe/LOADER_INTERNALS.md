@@ -90,3 +90,64 @@ je   ...
 既然 60 不在 53 个 handler 里，**先确认 loader 是否真的不用标准 DO_FCALL**：
 在 gdb 里对 `0x1c(%rbx)==60` 的条件下断（需要在 handler 公共入口设断点 + 条件判断）。
 如果能命中，就能顺着往下看到 op_array 指针。
+
+---
+
+# 重要更正（2026-11-17 07:50）：h53.asm 的归属搞错了
+
+## 证据
+
+**1. 字节特征反查，0 命中**
+
+`h53.asm` 里 opcode 3 的首条指令机器码 `41 55 41 54 55 48 89 fd`
+（push r13 / push r12 / push rbp / mov rdi,rbp）在 loader 文件里**一次都搜不到**。
+
+**2. ELF 头自己声明没有节头表**
+
+```
+e_shoff   = 0x0
+e_shnum   = 0
+```
+
+**3. 程序头只有两个 LOAD 段**
+
+```
+LOAD off=0x0      vaddr=0x0      filesz=0x25011  memsz=0x25011  flags=5 (R+X)
+LOAD off=0x25948  vaddr=0x2ab948 filesz=0x2c58   memsz=0xb098   flags=6 (R+W)
+```
+
+整个可执行范围就是 **0x0 ~ 0x25011（151KB）**。
+而 `h53.asm` 里的 `off` 最大到 **0x71510（464KB）** —— **超出 loader 的任何偏移**。
+
+**4. 那 2MB 的 `---p` 段是纯预留，从未写入**
+
+`catch syscall mprotect` 抓到 114 次调用，地址全在栈区（`0x7ffff...`），
+**没有一次涉及 loader 那个 2MB 段**；直接读它还报 EIO（无物理页）。
+
+## 结论
+
+**`h53.asm` 不是 loader 的代码，是 PHP 主程序（php-cgi）自己的 VM 代码**
+（`ZEND_VM_SET_OPCODE_HANDLER` 的 opcode 特化分发）。
+
+那"53 个 handler"是 **PHP 自己的**，`60`/`64` 不在表里也正常
+（DO_FCALL 是 `ZEND_VM_HOT_HANDLER` 单独实现的，RECV_INIT 是纯参数接收）。
+
+## 由此反推出的关键事实
+
+**loader 用的就是 PHP 标准 VM，执行的就是标准 op_array。**
+（与 dump 到的 `op[0]=64(ZEND_RECV_INIT)` 完全吻合。）
+
+所以「改 op_array」在原理上是成立的，之前的失败**全部源于我把
+`60(DO_FCALL)` 当成了 `62(RETURN)`**，抄错了 handler。
+
+## 但入口问题依然无解
+
+| 钩子 | 结果 |
+|---|---|
+| `zend_compile_file` | 加密文件**不走**（probe 在 loader 之前加载，loader 存的 orig 就是 probe 的 hook，仍 0 次调用） |
+| `zend_execute_ex` | **不走**（loader 先/probe 后、probe 先/loader 后，两种加载顺序都测过，0 次命中） |
+| `zend_hash_str_find_ptr` | **不走**（断点 0 命中） |
+| 遍历 `EG/CG(function_table)` | 能找到函数（dump 成功），但改它无效——loader 执行时不看这张表 |
+
+**loader 内嵌了一份静态链接的 PHP VM**（所以它用标准语义，但不经过主程序的任何全局函数指针）。
+要改到它的 op_array，只能 patch 它内嵌的那份 VM —— 那是完整逆向工程量。
