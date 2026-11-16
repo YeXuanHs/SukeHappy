@@ -1,0 +1,73 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4', '8.0', '8.1', '8.2', '8.3']
+        os: [ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    name: php-${{ matrix.php }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: none
+          coverage: none
+
+      - name: Build extension
+        run: |
+          set -eux
+          php -v
+          phpize
+          ./configure --with-php-config="$(which php-config)"
+          make -j"$(nproc)"
+          ls -l modules/mdyguard.so
+
+      - name: Smoke test (blocklist works)
+        run: |
+          set -eux
+          php -d extension="$PWD/modules/mdyguard.so" -r '
+            function greatMove(){ echo "SHOULD_NOT_PRINT\n"; }
+            greatMove();
+            echo "AFTER\n";
+          ' > out.txt 2>&1 || true
+          cat out.txt
+          if grep -q SHOULD_NOT_PRINT out.txt; then
+            echo "::error::blocked function still executed"
+            exit 1
+          fi
+          if grep -q AFTER out.txt; then
+            echo "::error::request was not aborted"
+            exit 1
+          fi
+          echo "blocked OK"
+
+      - name: Version + ABI
+        run: |
+          php -i | grep -E 'PHP API|PHP Extension|Zend Extension|Thread Safety' || true
+          php -d extension="$PWD/modules/mdyguard.so" -r 'print_r(get_loaded_extensions());' | grep -i mdyguard
+
+      - name: Rename artifact
+        run: |
+          ABI=$(php -r 'echo PHP_ZTS ? "zts" : "nts";')
+          VER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+          cp modules/mdyguard.so "mdyguard-${VER}-${ABI}-linux-x86_64.so"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mdyguard-php${{ matrix.php }}
+          path: mdyguard-*-linux-x86_64.so
+          if-no-files-found: error
