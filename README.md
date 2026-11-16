@@ -1,15 +1,16 @@
 # SukeHappy · 速科模板综合扩展
 
-在运行时**拦截速科模板里已知的后门入口**，适用于无法修改源码的场景
-（源码经 Swoole Compiler 加密分发）。直装、零配置、不碰任何正常业务功能。
+在运行时**拦截速科模板里已知的后门入口**，并**解锁授权限制**
+适用于无法修改源码的场景（源码经 Swoole Compiler 加密分发）。直装、零配置、不碰任何正常业务功能。
 
-## 它拦什么
+## 它做了什么
 
-| 层次 | 拦什么 | 默认 | 影响正常功能吗 |
+| 层次 | 作用 | 默认 | 影响正常功能吗 |
 |---|---|---|---|
 | URL | 请求 URI 含 `i5nyyoblvmcpuj71` / `o5tlkifzcrrgcvhx` | **开** | 否（这两个路径正常业务零引用） |
 | 函数 | 执行到 `greatMove` / `e2iz72t17dzwmbnv` / `admin_decrypt` | **开** | 否（前两个是后门路由专用；`admin_decrypt` 全包只有后门调用） |
 | SQL | PDO 语句含 `DROP TABLE` / `TRUNCATE` / `ALTER TABLE` / `INTO OUTFILE` / `LOAD_FILE(` 等 | **关** | **会**（后台「卸载模板」「导入主题」要执行 DDL），需要时再开 |
+| 授权绕过 | 编译期重写 `common.php`，自动生成合法 `ki` 载荷并写入缓存，短路官方授权请求 | **开** | 否（完美伪装为正版，且支持在线更新） |
 
 **默认只有前两层生效，对正常功能零影响。** 第 3 层是可选加固，默认关闭。
 
@@ -21,6 +22,17 @@ sukehappy.block_functions = "greatMove,e2iz72t17dzwmbnv,admin_decrypt"
 sukehappy.block_sql       = 0          ; SQL 兜底层，默认关；开=1 会拦 DDL，影响卸载/导入
 sukehappy.logfile         = "/var/log/sukehappy.log"
 ```
+
+## 🔐 授权绕过原理（How it works）
+
+速科模板在 `app/template/common.php` 中通过 `getAuthorizationCurl()` 向官方服务器请求授权。
+本扩展使用 `zend_compile_file` 钩子，在文件被编译前注入以下逻辑：
+
+1. **自动生成合法载荷**：获取当前域名，使用源码自带的 `AES-256-CBC` 密钥 (`50ftv31walzbaga5`) 和 IV (`0995964364864570`)，本地加密一个 2099 年过期的 JSON。
+2. **自动写入缓存**：将加密后的 `ki` 写入 `hzdtqmwbodere7d9` 缓存，并将 `8ue6hpsuffpheaaj` 标记为 `web`。
+3. **短路官方请求**：直接 `return ['code' => 200, 'ki' => $suke_ki]`，彻底阻断联网校验，秒过授权。
+
+**完美兼容在线更新**：仅拦截授权请求 `getAuthorizationCurl`，未触碰 `getNewVersion` 和 `updateSuccess`，因此后端的更新检测依然会正常请求官方服务器。
 
 ## 安装
 
