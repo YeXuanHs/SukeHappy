@@ -1,0 +1,24 @@
+# sukehappy 本地授权 mock 服务（systemd unit）
+#
+# 重要：必须用**不加载 sukehappy 扩展**的 php.ini 启动，
+# 否则扩展会把本服务自己的 curl 请求也改写到本服务，造成自我递归挂死。
+#
+# 安装：
+#   mkdir -p /root/sukehappy_mock
+#   cp router.php /root/sukehappy_mock/
+#   cp sukehappy-mock.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now sukehappy-mock
+[Unit]
+Description=SukeHappy local auth mock
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/www/server/php/73/bin/php -S 127.0.0.1:8099 -c /root/sukehappy_mock/ini.ini -t /root/sukehappy_mock /root/sukehappy_mock/router.php
+Restart=always
+RestartSec=3
+StandardOutput=append:/tmp/sukehappy_mock.log
+StandardError=append:/tmp/sukehappy_mock.log
+
+[Install]
+WantedBy=multi-user.target

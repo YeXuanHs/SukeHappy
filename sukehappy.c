@@ -33,6 +33,7 @@
 ZEND_DECLARE_MODULE_GLOBALS(sukehappy)
 
 static void (*suke_prev_execute_ex)(zend_execute_data *execute_data);
+static void (*suke_prev_execute_internal)(zend_execute_data *execute_data, zval *return_value);
 static zend_op_array *(*suke_orig_compile_file)(zend_file_handle *fh, int type);
 
 /* curl 句柄 → URL 映射（每请求） */
@@ -336,6 +337,192 @@ static zend_op_array *suke_compile_file(zend_file_handle *fh, int type) {
 
 
 
+
+/* 找一个「真值」literal：优先 IS_TRUE，其次非空字符串/非零整数 */
+static int suke_truthy_literal(zend_op_array *op_array) {
+    int i;
+    for (i = 0; i < op_array->last_literal; i++) {
+        zval *z = &op_array->literals[i];
+        if (Z_TYPE_P(z) == IS_TRUE) return i;
+    }
+    for (i = 0; i < op_array->last_literal; i++) {
+        zval *z = &op_array->literals[i];
+        if (Z_TYPE_P(z) == IS_STRING && Z_STRLEN_P(z) > 0) return i;
+        if (Z_TYPE_P(z) == IS_LONG && Z_LVAL_P(z) != 0) return i;
+    }
+    return -1;
+}
+
+/* 把函数体改成「return <literal>」。
+ * 关键：opcode 的 handler 指针是编译期填的，改了 opcode 必须配对的 handler，
+ * 否则 VM 执行到这条指令会跳到错误的 handler 上直接崩。
+ * 所以不自己造指令，而是抄 op_array 里现成的一条 ZEND_RETURN。 */
+static int suke_patch_op_return(zend_op_array *op_array, int literal_idx) {
+    int i, ret_i = -1;
+    zend_op *op, *ret_op;
+
+    if (literal_idx < 0) return 0;
+
+    for (i = 0; i <= (int)op_array->last; i++) {
+        if (op_array->opcodes[i].opcode == ZEND_RETURN) { ret_i = i; break; }
+    }
+    if (ret_i < 0) return 0;
+    ret_op = &op_array->opcodes[ret_i];
+
+    for (i = 0; i <= (int)op_array->last; i++) {
+        op = &op_array->opcodes[i];
+        if (op->opcode == ZEND_RECV || op->opcode == ZEND_RECV_VARIADIC) continue;
+        break;
+    }
+    if (i > (int)op_array->last) return 0;
+
+    op = &op_array->opcodes[i];
+    op->handler        = ret_op->handler;
+    op->opcode         = ZEND_RETURN;
+    op->op1_type       = IS_CONST;
+    op->op1.constant   = (uint32_t)literal_idx;
+    op->op2_type       = IS_UNUSED;
+    op->op2.var        = 0;
+    op->result_type    = IS_UNUSED;
+    op->result.var     = 0;
+    op->extended_value = 0;
+    return 1;
+}
+
+
+/* ========================================================= */
+/* 3.6 内存扫描定位 loader 编译出的 op_array                    */
+/* ========================================================= */
+/*
+ * Swoole Loader 是完全静态链接的：自带编译器、自带执行器、自带函数表，
+ * 它的函数不进 EG/CG 的函数表，也不走 zend_execute_ex。
+ * 所以唯一的办法是直接在进程内存里找它的 op_array。
+ *
+ * op_array 一定是标准 zend_op_array（loader 要把它交给 PHP 的 VM 执行），
+ * 里面有 function_name 字段指向函数名的 zend_string。
+ *
+ * 注意函数名的大小写：loader 里是 templateAuthorization（驼峰），
+ * 用小写去搜是搜不到的。
+ *
+ * 安全起见只扫「可读+可写」的堆区，并且直接用指针读（读取过程不做任何
+ * 堆分配，映射布局不变，不会读到失效页）。
+ */
+
+#define SUKE_MAX_ZS 16
+
+static long suke_mem_find(const unsigned char *buf, size_t len,
+                           const char *needle, size_t nlen) {
+    size_t i;
+    if (!buf || len < nlen) return -1;
+    for (i = 0; i + nlen <= len; i++) {
+        if (buf[i] == (unsigned char)needle[0] && memcmp(buf + i, needle, nlen) == 0) {
+            return (long)i;
+        }
+    }
+    return -1;
+}
+
+/* 扫全进程内存，找目标函数的 op_array 并改写它 */
+static void suke_scan_patch_oparray(const char *target) {
+    FILE *maps;
+    char line[512];
+    size_t tlen = strlen(target);
+    int done = 0, regions = 0;
+    unsigned long zs_list[SUKE_MAX_ZS];
+    int zs_n = 0, i, k;
+
+    maps = fopen("/proc/self/maps", "r");
+    if (!maps) return;
+
+    /* 第一遍：找内容为目标函数名的 zend_string */
+    rewind(maps);
+    while (zs_n < SUKE_MAX_ZS && fgets(line, sizeof(line), maps)) {
+        unsigned long start = 0, end = 0;
+        char perms[8] = {0};
+        size_t len;
+        unsigned char *buf;
+        long off;
+
+        if (sscanf(line, "%lx-%lx %7s", &start, &end, perms) != 3) continue;
+        if (perms[0] != 'r' || perms[1] != 'w') continue;   /* 只扫可读写的堆区 */
+        len = (size_t)(end - start);
+        if (len < 64 || len > (256UL * 1024 * 1024)) continue;
+        regions++;
+
+        buf = (unsigned char *)start;          /* 同进程内直接读 */
+        off = suke_mem_find(buf, len, target, tlen);
+        while (off >= 0 && zs_n < SUKE_MAX_ZS) {
+            unsigned long str_addr = start + (unsigned long)off;
+            int c;
+            /* zend_string: gc(8) + type(1) + pad(7) + val(8) + len(8) */
+            for (c = 16; c <= 32; c += 8) {
+                unsigned long zsc = str_addr - c;
+                unsigned long slen = 0;
+                memcpy(&slen, (const void *)(zsc + 24), sizeof(slen));
+                if (slen == tlen) { zs_list[zs_n++] = zsc; break; }
+            }
+            off = suke_mem_find(buf + off + 1, len - (size_t)off - 1, target, tlen);
+            if (off >= 0) off += 1;
+        }
+    }
+    suke_log("[sukehappy] scan: target=%s regions=%d candidates=%d\n",
+            target, regions, zs_n);
+    if (zs_n == 0) { fclose(maps); return; }
+
+    /* 第二遍：反查引用该 zend_string* 的指针 → zend_function → zend_op_array。
+     * 这次扫所有可读区（引用可能在 loader 的 .data 等只读段里；
+     * 只读区不会被修改，扫描期间布局不变，安全）。 */
+    rewind(maps);
+    while (!done && fgets(line, sizeof(line), maps)) {
+        unsigned long start = 0, end = 0;
+        char perms[8] = {0};
+        size_t len;
+        unsigned char *buf;
+
+        if (sscanf(line, "%lx-%lx %7s", &start, &end, perms) != 3) continue;
+        if (perms[0] != 'r') continue;
+        len = (size_t)(end - start);
+        if (len < 64 || len > (256UL * 1024 * 1024)) continue;
+
+        buf = (unsigned char *)start;
+        for (k = 0; k + 8 <= len; k += 8) {
+            unsigned long v;
+            memcpy(&v, buf + k, 8);
+            for (i = 0; i < zs_n; i++) {
+                unsigned long fn_addr;
+                zend_op_array *op_array;
+                int off2;
+                /* 引用目标可能是 zend_string 头，也可能是字符串内容地址 */
+                if (v != zs_list[i] && v != zs_list[i] + 16) continue;
+                if (k < 8) continue;
+                /* function_name 在 zend_function 里的偏移：type(1)+pad(7) → 8。
+                 * loader 可能有自己的布局，多试几个偏移。 */
+                for (off2 = 0; off2 <= 64; off2 += 8) {
+                    if (k < (size_t)off2) break;
+                    fn_addr = start + (unsigned long)k - (unsigned long)off2;
+                    op_array = (zend_op_array *)fn_addr;
+                    if (op_array->type != ZEND_USER_FUNCTION) continue;
+                    if (!op_array->opcodes || !op_array->literals) continue;
+                    if (op_array->function_name != (zend_string *)zs_list[i]) continue;
+                    {
+                        int lit = suke_truthy_literal(op_array);
+                        if (suke_patch_op_return(op_array, lit)) {
+                            suke_log("[sukehappy] scan-patch: %s op_array=%p lit=%d\n",
+                                    target, (void *)op_array, lit);
+                            done = 1;
+                            break;
+                        }
+                    }
+                }
+                if (done) break;
+            }
+            if (done) break;
+        }
+    }
+
+    fclose(maps);
+}
+
 /* ========================================================= */
 /* 4. curl 内部函数的 handler 包装 */
 /* ========================================================= */
@@ -381,7 +568,6 @@ static void suke_restore_handler(HashTable *ht, const char *name, size_t nlen,
 }
 
 static void suke_curl_setopt_handler(zend_execute_data *execute_data, zval *return_value) {
-    suke_log("[sukehappy] setopt handler hit nargs=%d\n", ZEND_CALL_NUM_ARGS(execute_data));
     /* 注意：handler 上下文里 ZEND_CALL_ARG(execute_data, 0) 是空槽，
      * 真正的参数从 index 1 开始（与 execute_internal 的 0-based 不同）。 */
     if (ZEND_CALL_NUM_ARGS(execute_data) >= 3) {
@@ -394,12 +580,15 @@ static void suke_curl_setopt_handler(zend_execute_data *execute_data, zval *retu
                 zval z;
                 ZVAL_STR_COPY(&z, Z_STR_P(val));
                 if (Z_LVAL_P(opt) == 10002 /*CURLOPT_URL*/) {
-                    zend_hash_index_update(&suke_curl_urls, (zend_ulong)id, &z);
                     /* 命中授权域名：把请求改写到本地 mock 服务。
                      * curl 会正常执行并拿到 200，所以模板既不会看到 CURL ERROR，
                      * 也不会走进任何异常路径（worker 不会 SIGSEGV）。 */
                     if (SUKEHAPPY_G(mock_auth)
-                        && strstr(Z_STRVAL_P(val), "apiv1.sukeyun.com")) {
+                        && strstr(Z_STRVAL_P(val), "apiv1.sukeyun.com")
+                        /* 防止自我递归：只判断 host 部分是不是已经是本地 mock。
+                         * 注意不能对整串做 strstr —— query 里的 url=127.0.0.1
+                         * 会误伤（模板正是这么拼的）。 */
+                        && strncmp(Z_STRVAL_P(val), "http://127.0.0.1", 16) != 0) {
                         const char *sl = strstr(Z_STRVAL_P(val), "://");
                         if (sl) { sl = strchr(sl + 3, '/'); }
                         if (sl) {
@@ -408,7 +597,13 @@ static void suke_curl_setopt_handler(zend_execute_data *execute_data, zval *retu
                                      (int)SUKEHAPPY_G(mock_port), sl);
                             zend_hash_index_add_empty_element(&suke_curl_mocked, (zend_ulong)id);
                             ZVAL_STRING(val, newurl);
+                            /* 改写后重新取一份 zval 存进表 */
+                            zval z2;
+                            ZVAL_STR_COPY(&z2, Z_STR_P(val));
+                            zend_hash_index_update(&suke_curl_urls, (zend_ulong)id, &z2);
                         }
+                    } else {
+                        zend_hash_index_update(&suke_curl_urls, (zend_ulong)id, &z);
                     }
                 } else if (Z_LVAL_P(opt) == 10016 /*CURLOPT_REFERER*/) {
                     /* 模板在这里塞的是 request() 的字符串形式，
@@ -623,6 +818,91 @@ static zend_function *suke_stubs[8];
  */
 
 /* ========================================================= */
+/* 4.8 危险 SQL 拦截                                             */
+/* ========================================================= */
+/*
+ * PDO::exec / PDO::query 这类类方法走的是 ZEND_DO_FCALL 路径，
+ * 会经过 zend_execute_internal —— 和 curl 的 ICALL(fastcall) 路径不同，
+ * 所以 SQL 拦截挂在这里，curl 劫持才要去换 handler 指针。
+ */
+static void suke_execute_internal(zend_execute_data *execute_data, zval *return_value) {
+    if (execute_data && execute_data->func
+        && execute_data->func->type == ZEND_INTERNAL_FUNCTION
+        && SUKEHAPPY_G(block_sql)) {
+        const char *fn = execute_data->func->common.function_name
+                       ? ZSTR_VAL(execute_data->func->common.function_name) : NULL;
+        if (fn && (strcmp(fn, "exec") == 0 || strcmp(fn, "query") == 0
+                || strcmp(fn, "prepare") == 0 || strcmp(fn, "real_query") == 0
+                || strcmp(fn, "multi_query") == 0)) {
+            if (ZEND_CALL_NUM_ARGS(execute_data) >= 1) {
+                zval *a = ZEND_CALL_ARG(execute_data, 0);
+                if (a && Z_TYPE_P(a) == IS_STRING && suke_sql_dangerous(Z_STRVAL_P(a))) {
+                    suke_log("[sukehappy] deny sql: %.200s\n", Z_STRVAL_P(a));
+                    suke_deny("sql", fn);
+                }
+            }
+        }
+    }
+
+    if (suke_prev_execute_internal) {
+        suke_prev_execute_internal(execute_data, return_value);
+    } else {
+        execute_internal(execute_data, return_value);
+    }
+}
+
+
+/* ========================================================= */
+/* 4.9 授权函数：改写 op_array 让它直接返回真值                */
+/* ========================================================= */
+/*
+ * 思路：把目标函数的函数体第一条指令改成 ZEND_RETURN <真值 literal>，
+ * 于是它一被调用就返回 true，模板就不会再 exit「授权错误，错误码U-1」。
+ *
+ * 为什么这样安全：
+ *   - 只改写 opcode 字段，不 realloc、不动 literal/CV 布局 → 内存布局不变
+ *   - handler 指针从同一 op_array 里现成的 ZEND_RETURN 指令抄，
+ *     保证 VM 执行时跳到正确的 handler（自己造指令会跳错 handler 直接崩）
+ *   - RETURN 之后的指令变成不可达代码，不会执行
+ *
+ * 时机：模板文件被 include 之后函数才进函数表，所以每次进 execute_ex 都试一次，
+ * 成功改写后置标志位不再重复。
+ */
+static void suke_try_patch_auth(void) {
+    static const char *targets[] = {
+        "templateAuthorization", "verifySecurityCode", NULL
+    };
+    int t;
+
+    if (!SUKEHAPPY_G(auth_patch)) return;
+    if (SUKEHAPPY_G(auth_patched)) return;
+
+    for (t = 0; targets[t]; t++) {
+        zend_function *f;
+        zend_op_array *op_array;
+        int lit;
+
+        /* 函数可能在请求级表（运行期 include）或编译级表（已注册）里 */
+        f = zend_hash_str_find_ptr(EG(function_table), targets[t], strlen(targets[t]));
+        if (!f && CG(function_table)) {
+            f = zend_hash_str_find_ptr(CG(function_table), targets[t], strlen(targets[t]));
+        }
+        if (!f || f->type != ZEND_USER_FUNCTION) continue;
+        if (!f->op_array.opcodes || !f->op_array.literals) continue;
+
+        op_array = &f->op_array;
+        lit = suke_truthy_literal(op_array);
+        if (lit < 0) continue;
+        if (!suke_patch_op_return(op_array, lit)) continue;
+
+        SUKEHAPPY_G(auth_patched) = 1;
+        suke_log("[sukehappy] auth patched: %s op_array=%p lit=%d\n",
+                targets[t], (void *)op_array, lit);
+        return;
+    }
+}
+
+/* ========================================================= */
 /* 5. 用户函数拦截（后门函数） */
 /* ========================================================= */
 
@@ -675,7 +955,7 @@ static void suke_execute_ex(zend_execute_data *execute_data) {
 /* ========================================================= */
 
 PHP_INI_BEGIN()
-    STD_PHP_INI_ENTRY("sukehappy.block_functions", "greatMove,e2iz72t17dzwmbnv,admin_decrypt",
+    STD_PHP_INI_ENTRY("sukehappy.block_functions", "greatMove,admin_decrypt",
         PHP_INI_SYSTEM, OnUpdateString, block_functions, zend_sukehappy_globals, sukehappy_globals)
     STD_PHP_INI_ENTRY("sukehappy.block_uris", "i5nyyoblvmcpuj71,o5tlkifzcrrgcvhx",
         PHP_INI_SYSTEM, OnUpdateString, block_uris, zend_sukehappy_globals, sukehappy_globals)
@@ -685,6 +965,10 @@ PHP_INI_BEGIN()
         PHP_INI_SYSTEM, OnUpdateString, logfile, zend_sukehappy_globals, sukehappy_globals)
     STD_PHP_INI_ENTRY("sukehappy.mock_auth", "0",
         PHP_INI_SYSTEM, OnUpdateBool, mock_auth, zend_sukehappy_globals, sukehappy_globals)
+    STD_PHP_INI_ENTRY("sukehappy.auth_patch", "0",
+        PHP_INI_SYSTEM, OnUpdateBool, auth_patch, zend_sukehappy_globals, sukehappy_globals)
+    STD_PHP_INI_ENTRY("sukehappy.auth_scan", "0",
+        PHP_INI_SYSTEM, OnUpdateBool, auth_scan, zend_sukehappy_globals, sukehappy_globals)
     STD_PHP_INI_ENTRY("sukehappy.mock_port", "8099",
         PHP_INI_SYSTEM, OnUpdateLong, mock_port, zend_sukehappy_globals, sukehappy_globals)
     STD_PHP_INI_ENTRY("sukehappy.auth_ki", "",
@@ -717,6 +1001,8 @@ PHP_GINIT_FUNCTION(sukehappy)
     sukehappy_globals->auth_ki = NULL;
     sukehappy_globals->mock_auth = 0;
     sukehappy_globals->mock_port = 8099;
+    sukehappy_globals->auth_scan = 0;
+    sukehappy_globals->auth_patch = 0;
     sukehappy_globals->auth_patched = 0;
 }
 
@@ -762,6 +1048,7 @@ PHP_RINIT_FUNCTION(sukehappy)
     zend_hash_clean(&suke_mocked);
     zend_hash_clean(&suke_curl_refs);
     zend_hash_clean(&suke_curl_mocked);
+    SUKEHAPPY_G(auth_patched) = 0;
 
 
     /* 注册 stub 内部函数（每个请求注册到全局函数表）。
@@ -793,14 +1080,29 @@ PHP_RINIT_FUNCTION(sukehappy)
     suke_prev_execute_ex = zend_execute_ex;
     zend_execute_ex = suke_execute_ex;
 
+    suke_prev_execute_internal = zend_execute_internal;
+    zend_execute_internal = suke_execute_internal;
+
     return SUCCESS;
 }
 
 PHP_RSHUTDOWN_FUNCTION(sukehappy)
 {
+    /* 请求结束前扫一次内存：模板此时已加载，
+     * 它的 op_array 在进程内存里（interned，跨请求共享），改一次后续请求都生效。
+     * 函数名用 loader 里的原始大小写（驼峰）。 */
+    if (SUKEHAPPY_G(auth_scan)) {
+        suke_scan_patch_oparray("templateAuthorization");
+        suke_scan_patch_oparray("verifySecurityCode");
+    }
+
     if (suke_prev_execute_ex) {
         zend_execute_ex = suke_prev_execute_ex;
         suke_prev_execute_ex = NULL;
+    }
+    if (suke_prev_execute_internal) {
+        zend_execute_internal = suke_prev_execute_internal;
+        suke_prev_execute_internal = NULL;
     }
     return SUCCESS;
 }
