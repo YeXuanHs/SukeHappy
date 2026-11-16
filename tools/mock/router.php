@@ -22,8 +22,15 @@ if (is_readable($mf)) {
     $msg = rtrim(file_get_contents($mf), "\r\n");
 }
 
+/* 访问日志：排查哪些请求没到 mock */
+@file_put_contents('/root/sukehappy_mock/access.log',
+    date('Y-m-d H:i:s').' '.$_SERVER['REQUEST_URI']."\n", FILE_APPEND);
+
 header('Content-Type: application/json; charset=utf-8');
 header('X-SukeHappy-Mock: 1');
+/* 关键：必须关闭连接。php -S 是单线程的，curl 默认 keep-alive，
+ * 连接不释放会把唯一的 worker 占住，后续请求全部排队直到超时。 */
+header('Connection: close');
 
 /* 授权校验：code=200；msg 的语义由 msg.txt 决定 */
 if (strpos($path, '/ky/admin/template') === 0) {

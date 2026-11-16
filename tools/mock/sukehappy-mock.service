@@ -1,11 +1,12 @@
 # sukehappy 本地授权 mock 服务（systemd unit）
 #
-# 重要：必须用**不加载 sukehappy 扩展**的 php.ini 启动，
-# 否则扩展会把本服务自己的 curl 请求也改写到本服务，造成自我递归挂死。
+# 用 Python 实现（ThreadingHTTPServer）：php -S 默认单线程，
+# 配合 curl 的 keep-alive 会把唯一 worker 占住，后续请求全排队超时
+# （表现为 FPM worker exit(1) → nginx 502）。
 #
 # 安装：
 #   mkdir -p /root/sukehappy_mock
-#   cp router.php /root/sukehappy_mock/
+#   cp server.py /root/sukehappy_mock/
 #   cp sukehappy-mock.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now sukehappy-mock
 [Unit]
@@ -14,9 +15,9 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/www/server/php/73/bin/php -S 127.0.0.1:8099 -c /root/sukehappy_mock/ini.ini -t /root/sukehappy_mock /root/sukehappy_mock/router.php
+ExecStart=/usr/bin/python3 /root/sukehappy_mock/server.py
 Restart=always
-RestartSec=3
+RestartSec=2
 StandardOutput=append:/tmp/sukehappy_mock.log
 StandardError=append:/tmp/sukehappy_mock.log
 
