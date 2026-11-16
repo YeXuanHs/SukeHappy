@@ -24,3 +24,4 @@ aclocal.m4
 install-sh
 missing
 ltmain.sh
+dist/
