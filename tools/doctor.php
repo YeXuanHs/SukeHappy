@@ -65,6 +65,18 @@ if ($what !== '') {
                 $r = getNewVersion();
                 $emit(['ok' => !(is_array($r) && array_key_exists('error', $r)), 'data' => $r]);
                 break;
+            case 'authorize':
+                if (!function_exists('getAuthorizationCurl')) {
+                    $emit(['ok' => false, 'error' => 'getAuthorizationCurl 不存在']);
+                    break;
+                }
+                $r = getAuthorizationCurl();
+                $ki = is_array($r) ? ($r['ki'] ?? '') : '';
+                $emit(['ok' => (is_array($r) && (($r['code'] ?? 0) == 200) && $ki !== ''),
+                       'code' => is_array($r) ? ($r['code'] ?? null) : null,
+                       'ki_len' => is_string($ki) ? strlen($ki) : 0]);
+                break;
+
             case 'cache':
                 $ki  = \think\facade\Cache::get('hzdtqmwbodere7d9');
                 $web = \think\facade\Cache::get('8ue6hpsuffpheaaj');
@@ -95,7 +107,10 @@ $rows = [];
 function sh_row(&$rows, $name, $ok, $detail) { $rows[] = [$name, $ok, $detail]; }
 
 function sh_child($root, $host, $what) {
-    $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__FILE__)
+    /* 子进程继承当前 ini（否则像 swoole_loader 这种靠 -c 指定的扩展加载不到） */
+    $ini = php_ini_loaded_file();
+    $iniArg = ($ini && is_file($ini)) ? (' -c ' . escapeshellarg($ini)) : '';
+    $cmd = escapeshellarg(PHP_BINARY) . $iniArg . ' ' . escapeshellarg(__FILE__)
          . ' --root=' . escapeshellarg($root)
          . ' --host=' . escapeshellarg($host)
          . ' --what=' . escapeshellarg($what) . ' 2>&1';
@@ -151,7 +166,14 @@ if ($j !== null && !empty($j['ok'])) {
     sh_row($rows, '授权状态', null, '结果不明：' . mb_substr(trim($out), 0, 70));
 }
 
-/* 3. 授权缓存 */
+/* 3. 授权缓存（先调 getAuthorizationCurl 主动刷新一次，再读） */
+$outA = sh_child($root, $host, 'authorize');
+$ja = sh_json($outA);
+if ($ja !== null) {
+    sh_row($rows, '授权刷新 getAuthorizationCurl', !empty($ja['ok']),
+        !empty($ja['ok']) ? '成功（code=200，ki ' . ($ja['ki_len'] ?? 0) . ' 字节）'
+                          : '失败（code=' . ($ja['code'] ?? '-') . '）');
+}
 $out2 = sh_child($root, $host, 'cache');
 $j2 = sh_json($out2);
 if ($j2 !== null && array_key_exists('ki_len', $j2)) {

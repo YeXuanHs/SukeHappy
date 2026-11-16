@@ -63,6 +63,7 @@ php tools/doctor.php --root=/www/wwwroot/你的站点 --host=你的域名 --url=
 | 检查项 | 怎么判断 |
 |---|---|
 | 授权状态 | 调 `templateAuthorization()`；未授权时该函数会 `exit("授权错误，错误码U-x")`，脚本捕获后判为未授权 |
+| 授权刷新 | 调 `getAuthorizationCurl()`，看能否拿到 `ki`（这是后台读的那个授权载荷） |
 | 授权缓存 | 读 `Cache::get('hzdtqmwbodere7d9')`、`Cache::get('8ue6hpsuffpheaaj')`，即 app 自己认的授权状态 |
 | 在线更新 | 调 `getNewVersion()`，返回版本信息=可用，返回 `error`=不可用 |
 | 后门入口 | 给了 `--url` 才查，HTTP 403/404/444 视为已封 |
@@ -77,6 +78,10 @@ php tools/doctor.php --root=/www/wwwroot/你的站点 --host=你的域名 --url=
   [ OK ] 在线更新           可用，最新版本 1.0.7.8
   [ OK ] 后门入口 /i5nyyoblvmcpuj71   HTTP 404
 ```
+
+子进程会继承当前的 `php.ini`（`-c` 一起带过去），所以像 swoole_loader 这种靠 `-c` 指定的扩展也能正常加载。
+
+跑之前注意：用**站点自己的 PHP**（`php -v` 确认版本），别用系统里另一个 PHP，否则 loader 与扩展 ABI 都可能不对。
 
 拿不到结论时加 `SUKEHAPPY_DEBUG=1` 看子进程原始输出。
 
