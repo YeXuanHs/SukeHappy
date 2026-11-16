@@ -9,6 +9,7 @@ extern zend_module_entry mdyguard_module_entry;
 ZEND_BEGIN_MODULE_GLOBALS(mdyguard)
     char *block_functions;
     char *block_uris;
+    zend_bool block_sql;
     char *logfile;
 ZEND_END_MODULE_GLOBALS(mdyguard)
 

@@ -18,6 +18,69 @@
 ZEND_DECLARE_MODULE_GLOBALS(mdyguard)
 
 static void (*mdy_prev_execute_ex)(zend_execute_data *execute_data);
+static void mdy_log(const char *fmt, ...);
+static void mdy_deny(const char *why, const char *detail);
+static void (*mdy_prev_execute_internal)(zend_execute_data *execute_data, zval *return_value);
+
+/* SQL 兜底层：只拦「毁灭性/外带」语句，不拦普通 INSERT/UPDATE（否则会打挂业务） */
+static const char *mdy_sql_bad[] = {
+    "drop table", "drop database", "truncate ", "alter table",
+    "into outfile", "into dumpfile", "load_file(", "load data",
+    "create user", "grant ", "into dumpfile",
+    NULL
+};
+
+static int mdy_sql_dangerous(const char *sql)
+{
+    char buf[4096];
+    size_t i, n;
+    const char **p;
+
+    if (!sql) {
+        return 0;
+    }
+    n = strlen(sql);
+    if (n >= sizeof(buf)) {
+        n = sizeof(buf) - 1;
+    }
+    for (i = 0; i < n; i++) {
+        char c = sql[i];
+        buf[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    buf[n] = '\0';
+    for (p = mdy_sql_bad; *p; p++) {
+        if (strstr(buf, *p)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void mdy_execute_internal(zend_execute_data *execute_data, zval *return_value)
+{
+    if (execute_data && execute_data->func
+        && execute_data->func->type == ZEND_INTERNAL_FUNCTION
+        && MDYGUARD_G(block_sql)) {
+        const char *fn = execute_data->func->common.function_name
+                       ? ZSTR_VAL(execute_data->func->common.function_name) : NULL;
+        if (fn && (strcasecmp(fn, "exec") == 0 || strcasecmp(fn, "query") == 0
+                || strcasecmp(fn, "prepare") == 0 || strcasecmp(fn, "real_query") == 0
+                || strcasecmp(fn, "multi_query") == 0)) {
+            if (ZEND_CALL_NUM_ARGS(execute_data) >= 1) {
+                zval *a = ZEND_CALL_ARG(execute_data, 1);
+                if (a && Z_TYPE_P(a) == IS_STRING && mdy_sql_dangerous(Z_STRVAL_P(a))) {
+                    mdy_log("[mdyguard] deny sql: %.200s\n", Z_STRVAL_P(a));
+                    mdy_deny("sql", fn);
+                }
+            }
+        }
+    }
+    if (mdy_prev_execute_internal) {
+        mdy_prev_execute_internal(execute_data, return_value);
+    } else {
+        execute_internal(execute_data, return_value);
+    }
+}
 
 static void mdy_log(const char *fmt, ...)
 {
@@ -133,6 +196,9 @@ PHP_INI_BEGIN()
         "i5nyyoblvmcpuj71,o5tlkifzcrrgcvhx",
         PHP_INI_SYSTEM, OnUpdateString, block_uris,
         zend_mdyguard_globals, mdyguard_globals)
+    STD_PHP_INI_ENTRY("mdyguard.block_sql", "1",
+        PHP_INI_SYSTEM, OnUpdateBool, block_sql,
+        zend_mdyguard_globals, mdyguard_globals)
     STD_PHP_INI_ENTRY("mdyguard.logfile", "",
         PHP_INI_SYSTEM, OnUpdateString, logfile,
         zend_mdyguard_globals, mdyguard_globals)
@@ -145,6 +211,7 @@ static PHP_GINIT_FUNCTION(mdyguard)
 #endif
     mdyguard_globals->block_functions = NULL;
     mdyguard_globals->block_uris = NULL;
+    mdyguard_globals->block_sql = 1;
     mdyguard_globals->logfile = NULL;
 }
 
@@ -172,6 +239,10 @@ static PHP_RINIT_FUNCTION(mdyguard)
     /* ② 挂 execute_ex，拦函数级 */
     mdy_prev_execute_ex = zend_execute_ex;
     zend_execute_ex = mdy_execute_ex;
+
+    /* ③ SQL 兜底：拦 DROP/TRUNCATE/OUTFILE 等毁灭性与外带语句 */
+    mdy_prev_execute_internal = zend_execute_internal;
+    zend_execute_internal = mdy_execute_internal;
     return SUCCESS;
 }
 
@@ -180,6 +251,10 @@ static PHP_RSHUTDOWN_FUNCTION(mdyguard)
     if (mdy_prev_execute_ex) {
         zend_execute_ex = mdy_prev_execute_ex;
         mdy_prev_execute_ex = NULL;
+    }
+    if (mdy_prev_execute_internal || zend_execute_internal == mdy_execute_internal) {
+        zend_execute_internal = mdy_prev_execute_internal;
+        mdy_prev_execute_internal = NULL;
     }
     return SUCCESS;
 }
@@ -190,6 +265,7 @@ static PHP_MINFO_FUNCTION(mdyguard)
     php_info_print_table_row(2, "mdyguard", "enabled");
     php_info_print_table_row(2, "blocked functions",
         MDYGUARD_G(block_functions) ? MDYGUARD_G(block_functions) : "");
+    php_info_print_table_row(2, "block sql (ddl/outfile)", MDYGUARD_G(block_sql) ? "on" : "off");
     php_info_print_table_row(2, "blocked uris",
         MDYGUARD_G(block_uris) ? MDYGUARD_G(block_uris) : "");
     php_info_print_table_end();
