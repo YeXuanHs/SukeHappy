@@ -24,7 +24,7 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: none
+          extensions: pdo_sqlite
           coverage: none
 
       - name: Build extension
@@ -54,6 +54,41 @@ jobs:
             exit 1
           fi
           echo "blocked OK"
+
+      - name: Smoke test (SQL guard)
+        run: |
+          set -eux
+          EXT="$PWD/modules/mdyguard.so"
+          # CREATE/INSERT/SELECT 必须放行
+          php -d extension="$EXT" -r '
+            $p = new PDO("sqlite::memory:");
+            $p->exec("CREATE TABLE t(a int)");
+            $p->exec("INSERT INTO t VALUES(1)");
+            echo "SQL_OK " . count($p->query("SELECT a FROM t")->fetchAll()) . "\n";
+          ' | tee sql1.txt
+          grep -q "SQL_OK 1" sql1.txt
+          # DROP 必须被拦
+          php -d extension="$EXT" -r '
+            $p = new PDO("sqlite::memory:");
+            $p->exec("CREATE TABLE t(a int)");
+            $p->exec("DROP TABLE t");
+            echo "DROP_PASSED\n";
+          ' > sql2.txt 2>&1 || true
+          if grep -q DROP_PASSED sql2.txt; then
+            echo "::error::DROP was not blocked"
+            exit 1
+          fi
+          # INTO OUTFILE 必须被拦
+          php -d extension="$EXT" -r '
+            $p = new PDO("sqlite::memory:");
+            $p->exec("SELECT 1 INTO OUTFILE \"x\"");
+            echo "OUTFILE_PASSED\n";
+          ' > sql3.txt 2>&1 || true
+          if grep -q OUTFILE_PASSED sql3.txt; then
+            echo "::error::OUTFILE was not blocked"
+            exit 1
+          fi
+          echo "sql guard OK"
 
       - name: Version + ABI
         run: |
