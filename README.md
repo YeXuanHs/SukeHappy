@@ -5,20 +5,20 @@
 
 ## 它拦什么
 
-| 层次 | 拦什么 | 默认值 | 命中后行为 |
+| 层次 | 拦什么 | 默认 | 影响正常功能吗 |
 |---|---|---|---|
-| URL | 请求 URI 子串 | `i5nyyoblvmcpuj71`、`o5tlkifzcrrgcvhx` | 404 + 终止 |
-| 函数 | 执行到这些函数 | `greatMove`、`e2iz72t17dzwmbnv`、`admin_decrypt` | 404 + 终止 |
-| SQL | PDO 语句含毁灭性/外带特征 | `DROP TABLE`、`TRUNCATE`、`ALTER TABLE`、`INTO OUTFILE`、`LOAD_FILE(` 等 | 404 + 终止 |
+| URL | 请求 URI 含 `i5nyyoblvmcpuj71` / `o5tlkifzcrrgcvhx` | **开** | 否（这两个路径正常业务零引用） |
+| 函数 | 执行到 `greatMove` / `e2iz72t17dzwmbnv` / `admin_decrypt` | **开** | 否（前两个是后门路由专用；`admin_decrypt` 全包只有后门调用） |
+| SQL | PDO 语句含 `DROP TABLE` / `TRUNCATE` / `ALTER TABLE` / `INTO OUTFILE` / `LOAD_FILE(` 等 | **关** | **会**（后台「卸载模板」「导入主题」要执行 DDL），需要时再开 |
 
-三层是独立的，任何一层命中都会终止请求。
+**默认只有前两层生效，对正常功能零影响。** 第 3 层是可选加固，默认关闭。
 
-两者都可通过 php.ini 覆盖，不写死：
+三项都可通过 php.ini 覆盖，不写死：
 
 ```ini
 mdyguard.block_uris      = "i5nyyoblvmcpuj71,o5tlkifzcrrgcvhx"
 mdyguard.block_functions = "greatMove,e2iz72t17dzwmbnv,admin_decrypt"
-mdyguard.block_sql       = 1          ; SQL 兜底层开关，1=开 0=关
+mdyguard.block_sql       = 0          ; SQL 兜底层，默认关；开=1 会拦 DDL，影响卸载/导入
 mdyguard.logfile         = "/var/log/mdyguard.log"
 ```
 
@@ -50,11 +50,10 @@ sudo make install
 
 - 只做**拦截**，不修改任何业务逻辑；命中即 404 + `zend_bailout()`，不输出任何内容。
 - 拦的是「函数名」，不是「类方法」，所以同名函数会被一起拦下——本仓库面向的后门函数名足够独特。
-- 第 3 层只拦**毁灭性/外带**语句（DROP/TRUNCATE/ALTER/OUTFILE/LOAD_FILE/GRANT），
-  **不拦 INSERT/UPDATE/DELETE** —— 否则会把正常业务打挂。所以它挡不住"静默篡改数据"，
-  只挡"灭库/写文件/提权"。要防篡改，得靠第 1、2 层在入口就把请求掐死。
-- 后台的「卸载模板」本身会 DROP TABLE，开了第 3 层会被拦。真需要卸载时临时
-  `mdyguard.block_sql=0` 或在 CLI 里跑（CLI 不设 HTTP 状态，但同样会 bailout）。
+- **第 3 层默认关闭**，因为后台的「卸载模板」「导入主题」本身要执行 DDL，开了会误伤。
+  需要更强加固时再显式 `mdyguard.block_sql=1`，用完记得关回去。
+- 第 3 层即使开了也只拦**毁灭性/外带**语句，**不拦 INSERT/UPDATE/DELETE**（会打挂业务），
+  所以它挡不住"静默篡改数据"，只挡"灭库/写文件/提权"。
 - 这是**缓解手段**，不是根治。根治要打官方补丁或替换掉含后门的加密文件。
 - 仅限用于你自己拥有/运维的站点。
 

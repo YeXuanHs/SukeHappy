@@ -196,7 +196,7 @@ PHP_INI_BEGIN()
         "i5nyyoblvmcpuj71,o5tlkifzcrrgcvhx",
         PHP_INI_SYSTEM, OnUpdateString, block_uris,
         zend_mdyguard_globals, mdyguard_globals)
-    STD_PHP_INI_ENTRY("mdyguard.block_sql", "1",
+    STD_PHP_INI_ENTRY("mdyguard.block_sql", "0",
         PHP_INI_SYSTEM, OnUpdateBool, block_sql,
         zend_mdyguard_globals, mdyguard_globals)
     STD_PHP_INI_ENTRY("mdyguard.logfile", "",
@@ -211,7 +211,7 @@ static PHP_GINIT_FUNCTION(mdyguard)
 #endif
     mdyguard_globals->block_functions = NULL;
     mdyguard_globals->block_uris = NULL;
-    mdyguard_globals->block_sql = 1;
+    mdyguard_globals->block_sql = 0;
     mdyguard_globals->logfile = NULL;
 }
 

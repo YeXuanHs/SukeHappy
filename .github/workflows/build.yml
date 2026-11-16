@@ -68,7 +68,7 @@ jobs:
           ' | tee sql1.txt
           grep -q "SQL_OK 1" sql1.txt
           # DROP 必须被拦
-          php -d extension="$EXT" -r '
+          php -d extension="$EXT" -d mdyguard.block_sql=1 -r '
             $p = new PDO("sqlite::memory:");
             $p->exec("CREATE TABLE t(a int)");
             $p->exec("DROP TABLE t");
@@ -79,7 +79,7 @@ jobs:
             exit 1
           fi
           # INTO OUTFILE 必须被拦
-          php -d extension="$EXT" -r '
+          php -d extension="$EXT" -d mdyguard.block_sql=1 -r '
             $p = new PDO("sqlite::memory:");
             $p->exec("SELECT 1 INTO OUTFILE \"x\"");
             echo "OUTFILE_PASSED\n";
@@ -88,6 +88,14 @@ jobs:
             echo "::error::OUTFILE was not blocked"
             exit 1
           fi
+          # 默认配置（block_sql=0）下 DROP 必须放行 —— 证明不影响卸载/导入功能
+          php -d extension="$EXT" -r '
+            $p = new PDO("sqlite::memory:");
+            $p->exec("CREATE TABLE t(a int)");
+            $p->exec("DROP TABLE t");
+            echo "DROP_ALLOWED_BY_DEFAULT\n";
+          ' | tee sql4.txt
+          grep -q DROP_ALLOWED_BY_DEFAULT sql4.txt
           echo "sql guard OK"
 
       - name: Version + ABI
