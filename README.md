@@ -24,7 +24,7 @@ sukehappy.logfile         = "/var/log/sukehappy.log"
 
 ## 安装
 
-从 [Releases](../../releases) 里下载对应 PHP 版本的 `.so`（注意 **NTS / ZTS** 要跟你的 PHP 一致），然后：
+从 [Releases](../../releases) 里下载对应 PHP 版本的 `.so`（现提供 **7.1 / 7.2 / 7.3 / 7.4**，NTS），然后：
 
 ```ini
 extension=/path/to/SukeHappy-7.4-nts-linux-x86_64.so
@@ -45,6 +45,8 @@ phpize
 make
 sudo make install
 ```
+
+各版本一致：`php` / `php-config` 指向哪个版本，就编出哪个版本的 `.so`。
 
 ## 说明
 

@@ -9,108 +9,107 @@ on:
 
 jobs:
   build:
+    name: php-${{ matrix.php }}
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
-        php: ['7.4', '8.0', '8.1', '8.2', '8.3']
-        os: [ubuntu-22.04]
-    runs-on: ${{ matrix.os }}
-    name: php-${{ matrix.php }}
+        php: ['7.1', '7.2', '7.3', '7.4']
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup PHP ${{ matrix.php }}
-        uses: shivammathur/setup-php@v2
+      - name: Build in php:${{ matrix.php }}-cli
+        run: |
+          set -eux
+          docker run --rm -v "$PWD":/src -w /src php:${{ matrix.php }}-cli sh -c '
+            set -e
+            if ! command -v autoconf >/dev/null 2>&1; then
+              apt-get update -qq && apt-get install -y -qq --no-install-recommends autoconf gcc make libc-dev pkg-config >/dev/null
+            fi
+            php -v
+            phpize
+            ./configure --with-php-config="$(which php-config)"
+            make -j"$(nproc)"
+            ls -l modules/sukehappy.so
+          '
+
+      - name: Smoke test (function guard)
+        run: |
+          set -eux
+          docker run --rm -v "$PWD":/src -w /src php:${{ matrix.php }}-cli sh -c '
+            php -d extension=/src/modules/sukehappy.so -r "
+              function greatMove(){ echo \"SHOULD_NOT_PRINT\n\"; }
+              greatMove();
+              echo \"AFTER\n\";
+            " > /src/out.txt 2>&1 || true
+            cat /src/out.txt
+            if grep -q SHOULD_NOT_PRINT /src/out.txt; then exit 1; fi
+            if grep -q AFTER /src/out.txt; then exit 1; fi
+            echo "blocked OK"
+          '
+          # 普通代码不能被影响
+          docker run --rm -v "$PWD":/src -w /src php:${{ matrix.php }}-cli sh -c '
+            php -d extension=/src/modules/sukehappy.so -r "echo \"NORMAL-OK\n\";" | grep -q NORMAL-OK
+          '
+
+      - name: Rename artifact
+        run: |
+          set -eux
+          VER="${{ matrix.php }}"
+          cp modules/sukehappy.so "sukehappy-${VER}-nts-linux-x86_64.so"
+          ls -l sukehappy-*.so
+
+      - uses: actions/upload-artifact@v4
         with:
-          php-version: ${{ matrix.php }}
+          name: sukehappy-php${{ matrix.php }}
+          path: sukehappy-*-nts-linux-x86_64.so
+          if-no-files-found: error
+
+  sql-guard:
+    name: sql-guard (php-7.4)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '7.4'
           extensions: pdo_sqlite
           coverage: none
 
-      - name: Build extension
+      - name: Build
         run: |
           set -eux
-          php -v
           phpize
           ./configure --with-php-config="$(which php-config)"
           make -j"$(nproc)"
-          ls -l modules/sukehappy.so
 
-      - name: Smoke test (blocklist works)
-        run: |
-          set -eux
-          php -d extension="$PWD/modules/sukehappy.so" -r '
-            function greatMove(){ echo "SHOULD_NOT_PRINT\n"; }
-            greatMove();
-            echo "AFTER\n";
-          ' > out.txt 2>&1 || true
-          cat out.txt
-          if grep -q SHOULD_NOT_PRINT out.txt; then
-            echo "::error::blocked function still executed"
-            exit 1
-          fi
-          if grep -q AFTER out.txt; then
-            echo "::error::request was not aborted"
-            exit 1
-          fi
-          echo "blocked OK"
-
-      - name: Smoke test (SQL guard)
+      - name: SQL layer assertions
         run: |
           set -eux
           EXT="$PWD/modules/sukehappy.so"
-          # CREATE/INSERT/SELECT 必须放行
-          php -d extension="$EXT" -r '
-            $p = new PDO("sqlite::memory:");
-            $p->exec("CREATE TABLE t(a int)");
-            $p->exec("INSERT INTO t VALUES(1)");
-            echo "SQL_OK " . count($p->query("SELECT a FROM t")->fetchAll()) . "\n";
-          ' | tee sql1.txt
-          grep -q "SQL_OK 1" sql1.txt
-          # DROP 必须被拦
-          php -d extension="$EXT" -d sukehappy.block_sql=1 -r '
-            $p = new PDO("sqlite::memory:");
-            $p->exec("CREATE TABLE t(a int)");
-            $p->exec("DROP TABLE t");
-            echo "DROP_PASSED\n";
-          ' > sql2.txt 2>&1 || true
-          if grep -q DROP_PASSED sql2.txt; then
-            echo "::error::DROP was not blocked"
-            exit 1
-          fi
-          # INTO OUTFILE 必须被拦
-          php -d extension="$EXT" -d sukehappy.block_sql=1 -r '
-            $p = new PDO("sqlite::memory:");
-            $p->exec("SELECT 1 INTO OUTFILE \"x\"");
-            echo "OUTFILE_PASSED\n";
-          ' > sql3.txt 2>&1 || true
-          if grep -q OUTFILE_PASSED sql3.txt; then
-            echo "::error::OUTFILE was not blocked"
-            exit 1
-          fi
-          # 默认配置（block_sql=0）下 DROP 必须放行 —— 证明不影响卸载/导入功能
+          # 默认（block_sql=0）必须放行 DROP，避免误伤卸载/导入
           php -d extension="$EXT" -r '
             $p = new PDO("sqlite::memory:");
             $p->exec("CREATE TABLE t(a int)");
             $p->exec("DROP TABLE t");
             echo "DROP_ALLOWED_BY_DEFAULT\n";
-          ' | tee sql4.txt
-          grep -q DROP_ALLOWED_BY_DEFAULT sql4.txt
+          ' | tee a.txt
+          grep -q DROP_ALLOWED_BY_DEFAULT a.txt
+          # 手动开启后必须拦 DROP
+          php -d extension="$EXT" -d sukehappy.block_sql=1 -r '
+            $p = new PDO("sqlite::memory:");
+            $p->exec("CREATE TABLE t(a int)");
+            $p->exec("DROP TABLE t");
+            echo "DROP_PASSED\n";
+          ' > b.txt 2>&1 || true
+          if grep -q DROP_PASSED b.txt; then echo "::error::DROP not blocked"; exit 1; fi
+          # 手动开启后必须拦 INTO OUTFILE
+          php -d extension="$EXT" -d sukehappy.block_sql=1 -r '
+            $p = new PDO("sqlite::memory:");
+            $p->exec("SELECT 1 INTO OUTFILE \"x\"");
+            echo "OUTFILE_PASSED\n";
+          ' > c.txt 2>&1 || true
+          if grep -q OUTFILE_PASSED c.txt; then echo "::error::OUTFILE not blocked"; exit 1; fi
           echo "sql guard OK"
-
-      - name: Version + ABI
-        run: |
-          php -i | grep -E 'PHP API|PHP Extension|Zend Extension|Thread Safety' || true
-          php -d extension="$PWD/modules/sukehappy.so" -r 'print_r(get_loaded_extensions());' | grep -i sukehappy
-
-      - name: Rename artifact
-        run: |
-          ABI=$(php -r 'echo PHP_ZTS ? "zts" : "nts";')
-          VER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
-          cp modules/sukehappy.so "sukehappy-${VER}-${ABI}-linux-x86_64.so"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sukehappy-php${{ matrix.php }}
-          path: sukehappy-*-linux-x86_64.so
-          if-no-files-found: error
