@@ -37,6 +37,37 @@ sukehappy.logfile=/var/log/sukehappy.log
 php -m | grep SukeHappy
 ```
 
+## 体检脚本
+
+`tools/doctor.php` —— 引导站点应用，**直接调用模板自己的函数**，回报两件事：
+现在是不是已授权、在线更新能不能用。
+
+```bash
+php tools/doctor.php --root=/www/wwwroot/你的站点 --host=你的域名 --url=https://你的域名
+```
+
+它会调 `templateAuthorization()` / `getNewVersion()`，而不是自己重新拼一遍请求：
+
+| 检查项 | 怎么判断 |
+|---|---|
+| 授权状态 | 调 `templateAuthorization()`；未授权时该函数会 `exit("授权错误，错误码U-x")`，脚本捕获后判为未授权 |
+| 授权缓存 | 读 `Cache::get('hzdtqmwbodere7d9')`、`Cache::get('8ue6hpsuffpheaaj')`，即 app 自己认的授权状态 |
+| 在线更新 | 调 `getNewVersion()`，返回版本信息=可用，返回 `error`=不可用 |
+| 后门入口 | 给了 `--url` 才查，HTTP 403/404/444 视为已封 |
+
+输出示例：
+
+```
+  [ OK ] 扩展已加载        sukehappy
+  [ OK ] 授权状态           已授权（templateAuthorization 正常返回）
+  [ OK ] 授权缓存 ki        有（348 字节，5f2a9c...）
+  [ OK ] 授权标记 web       "web" 已写入
+  [ OK ] 在线更新           可用，最新版本 1.0.7.8
+  [ OK ] 后门入口 /i5nyyoblvmcpuj71   HTTP 404
+```
+
+拿不到结论时加 `SUKEHAPPY_DEBUG=1` 看子进程原始输出。
+
 ## 本地编译
 
 ```bash

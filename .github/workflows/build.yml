@@ -113,3 +113,10 @@ jobs:
           ' > c.txt 2>&1 || true
           if grep -q OUTFILE_PASSED c.txt; then echo "::error::OUTFILE not blocked"; exit 1; fi
           echo "sql guard OK"
+
+      - name: Doctor self-test (no crash on bad root)
+        run: |
+          set -eux
+          php tools/doctor.php --root=/tmp/nonexistent 2>&1 | tee d.txt
+          grep -q "扩展已加载" d.txt
+          grep -q "BOOTSTRAP_FAIL" d.txt
