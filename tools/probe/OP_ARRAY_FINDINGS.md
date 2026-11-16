@@ -97,3 +97,80 @@ loader 执行时用的是它自己表里的那一份。
 
 真要做，成本集中在「定位 loader 内部函数表 + 它自己的 opcode 语义」，
 属于二进制 patch 级别的工程（不是 PHP 扩展能覆盖的层面）。
+
+---
+
+# 追加：两个重要更正（2026-11-17 07:40）
+
+## 更正 1：opcode 编号我之前搞错了，之前所有 op_array 实验因此失真
+
+PHP 7.4 **真实**编号（`/opt/php74/include/php/Zend/zend_vm_opcodes.h`）：
+
+```
+59 = ZEND_INIT_FCALL_BY_NAME
+60 = ZEND_DO_FCALL          ← 不是 RETURN！
+62 = ZEND_RETURN            ← 真正的 RETURN
+63 = ZEND_RECV
+64 = ZEND_RECV_INIT         ← dump 里 op[0]=64，与 FINAL_dis 的 "000 RECV_INIT" 完全吻合
+68 = ZEND_NEW
+```
+
+所以之前 dump 到的 `op[2]=60 / op[5]=60` 是 **DO_FCALL**，不是 RETURN；
+我"抄一条现成 RETURN 的 handler"时抄到的是 **DO_FCALL 的 handler**，
+再配上 opcode 写成（我误认为的）RETURN —— 造出来的是一条畸形指令。
+
+**这意味着：op_array 改写从来没有在正确参数下被真正验证过。**
+之前的"返回 NULL / 乱码"不能作为"不可行"的证据。
+
+## 更正 2：loader 对加密文件完全不走 `zend_compile_file`
+
+dp 实测（probe 比 loader 先加载，故 loader MINIT 时保存的 orig 就是 probe 的 hook）：
+
+```
+RINIT-ENTER, zend_compile_file=0x7f3f5880baa0   ← = loader 基址 + 0x10baa0
+```
+
+但 `compile_file called` 一条都没有 → **loader 用自己的编译器，不经过任何 PHP 公开入口**。
+
+## 更正 3：loader 是「节头全删」的加壳二进制
+
+```
+readelf -SW      → 空（节头被删）
+objdump -s -j .rodata → 无输出
+readelf -rW      → no relocations（动态重定位 0 条）
+readelf -dW      → NEEDED 只有 libc.so.6
+readelf -sW      → 无符号表
+```
+
+但 `strings` 里有一堆 `zend_*` 名字 → 它是**按名字在内存里自解析**（手动 dlsym 风格）。
+→ **没有 GOT 可以劫持**，没法在 PLT 层面插桩。
+
+## 更正 4：h53.asm 不是「53 个 handler 的表」，而是 opcode 特化分发逻辑
+
+```asm
+movzbl 0x1c(%rbx),%edx        ; 取一个字节（loader 自己 opcode 流里的 opcode）
+lea    0x43f02(%rip),%rax     ; 0x43f30 ← flags 表（uint32 × N）
+mov    (%rax,%rdx,4),%eax     ; flags = table[opcode]
+test   $0x10000,%eax          ; 位测试 → 选特化 handler
+lea    (%rdx,%rdx,4),%edx     ; edx = edx*5（累加偏移）
+add    (%rcx,%rsi,4),%edx     ; 再加 operand type 表（0x43ad0）的项
+```
+
+这是 **PHP 标准 `ZEND_VM_SET_OPCODE_HANDLER` 的特化选择逻辑** —— 说明 loader 解码后
+产出的就是标准 zend_op，**用的就是标准 VM 语义**。
+
+## 因此下一步（对症的做法）
+
+既然 loader 为「被调函数」生成**特化的调用 handler**（把 op_array 指针硬编码进调用点），
+那真正要对症的是那个**硬编码的 op_array 指针**，而不是函数表：
+
+1. gdb 在 `templateAuthorization` 执行时抓现场（断点：`ZEND_DO_FCALL` 之后、
+   或直接在那条特化 handler 上）
+2. 从调用点的 opcode / run_time_cache 里找出 op_array 指针
+3. 把那个指针换成我们自己构造的 `function(){ return true; }` 的 op_array
+   （`zend_compile_string` 现编一个就能拿到）
+
+比改 opcode 干净：**不动任何指令，只换一个指针**。
+
+另外，**用正确的 62 + 从别的函数借 RETURN handler** 重新跑一遍 op_array 改写
+也应该做 —— 之前的失败是在错参数下得到的，不算数。
