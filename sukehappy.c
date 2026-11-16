@@ -1,3 +1,18 @@
+/*
+ * sukehappy — 速科模板综合扩展
+ *
+ * 能力：
+ *   1) 拦截后门入口（URI + 函数名），零功能影响
+ *   2) 可选：拦截 DDL/OUTFILE 等危险 SQL
+ *   3) 可选（mock_auth=1）：在 curl 层伪造 apiv1.sukeyun.com 的响应，
+ *      使模板的授权校验与在线更新完全本地化，不再依赖厂商服务器。
+ *
+ * 为什么在 curl 层做：
+ *   模板源码被 Swoole Loader 加密，编译期改不了（loader 绕开了全局
+ *   zend_compile_file / zend_compile_string，自带编译流程）。
+ *   但授权判定的咽喉是 PHP curl 扩展的 curl_exec —— 它是内部函数，
+ *   可以在 zend_execute_internal 上精确劫持。
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -6,46 +21,28 @@
 #include "php_ini.h"
 #include "SAPI.h"
 #include "Zend/zend_exceptions.h"
-#include "zend_compile.h"
 #include "ext/standard/info.h"
 #include "php_sukehappy.h"
+
+#include <string.h>
+#include <stdlib.h>
 
 ZEND_DECLARE_MODULE_GLOBALS(sukehappy)
 
 static void (*suke_prev_execute_ex)(zend_execute_data *execute_data);
 static void (*suke_prev_execute_internal)(zend_execute_data *execute_data, zval *return_value);
-static zend_op_array *(*suke_orig_compile_file)(zend_file_handle *fh, int type);
+
+/* curl 句柄 → URL 映射（每请求） */
+static HashTable suke_curl_urls;
+/* 已伪造过响应的句柄 */
+static HashTable suke_mocked;
 
 static void suke_log(const char *fmt, ...);
 static void suke_deny(const char *why, const char *detail);
 
 /* ========================================================= */
-/* 1. 运行时拦截逻辑（防后门、防毁库） */
+/* 1. 通用工具 */
 /* ========================================================= */
-
-static const char *suke_sql_bad[] = {
-    "drop table", "drop database", "truncate ", "alter table",
-    "into outfile", "into dumpfile", "load_file(", "load data",
-    "create user", "grant ", "into dumpfile", NULL
-};
-
-static int suke_sql_dangerous(const char *sql) {
-    char buf[4096];
-    size_t i, n;
-    const char **p;
-    if (!sql) return 0;
-    n = strlen(sql);
-    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-    for (i = 0; i < n; i++) {
-        char c = sql[i];
-        buf[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-    }
-    buf[n] = '\0';
-    for (p = suke_sql_bad; *p; p++) {
-        if (strstr(buf, *p)) return 1;
-    }
-    return 0;
-}
 
 static int suke_in_list(const char *word, const char *list) {
     const char *p;
@@ -61,6 +58,29 @@ static int suke_in_list(const char *word, const char *list) {
         if (len == n && strncasecmp(p, word, n) == 0) return 1;
         if (!e) break;
         p = e + 1;
+    }
+    return 0;
+}
+
+static int suke_sql_dangerous(const char *sql) {
+    static const char *bad[] = {
+        "drop table", "drop database", "truncate ", "alter table",
+        "into outfile", "into dumpfile", "load_file(", "load data",
+        "create user", "grant ", NULL
+    };
+    char buf[4096];
+    size_t i, n;
+    const char **p;
+    if (!sql) return 0;
+    n = strlen(sql);
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    for (i = 0; i < n; i++) {
+        char c = sql[i];
+        buf[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    buf[n] = '\0';
+    for (p = bad; *p; p++) {
+        if (strstr(buf, *p)) return 1;
     }
     return 0;
 }
@@ -96,30 +116,198 @@ static void suke_deny(const char *why, const char *detail) {
     zend_bailout();
 }
 
+/* ========================================================= */
+/* 2. 授权响应伪造 */
+/* ========================================================= */
+
+/* 取 URL query 里某参数的值（不解码 %xx） */
+static int suke_url_param(const char *url, const char *key, char *out, size_t outlen) {
+    const char *p = strstr(url, "?");
+    size_t klen = strlen(key);
+    if (!p) return 0;
+    p++;
+    while (*p) {
+        if (strncmp(p, key, klen) == 0 && p[klen] == '=') {
+            p += klen + 1;
+            size_t i = 0;
+            while (*p && *p != '&' && i + 1 < outlen) { out[i++] = *p++; }
+            out[i] = '\0';
+            return 1;
+        }
+        p = strchr(p, '&');
+        if (!p) break;
+        p++;
+    }
+    return 0;
+}
+
+/* 生成授权中心的伪造响应；返回 0 表示不伪造 */
+static int suke_mock_response(const char *url, char *buf, size_t buflen) {
+    const char *ki;
+    char dom[256];
+
+    if (!url || !strstr(url, "apiv1.sukeyun.com")) return 0;
+
+    /* ① /ky/admin/template?url=<域名>&v=cx  （templateAuthorization）
+     *    要求 code==200 且 msg 存在；msg 必须等于请求里的域名，否则 exit U-1 */
+    if (strstr(url, "/ky/admin/template")) {
+        if (!suke_url_param(url, "url", dom, sizeof(dom))) dom[0] = '\0';
+        snprintf(buf, buflen,
+                 "{\"code\":200,\"msg\":\"%s\",\"data\":{\"query\":true,\"version\":\"1.0.7.6\","
+                 "\"status\":200,\"activation\":false,\"msg\":\"ok\"}}", dom);
+        return 1;
+    }
+
+    /* ② /ky/admin  （getAuthorizationCurl）
+     *    要求 code==200 且 ki 非空；ki 会写进 cache hzdtqmwbodere7d9 当 JWT 密钥 */
+    if (strstr(url, "/ky/admin") && !strstr(url, "/ky/admin/")) {
+        ki = SUKEHAPPY_G(auth_ki);
+        snprintf(buf, buflen, "{\"code\":200,\"ki\":\"%s\",\"msg\":\"ok\"}",
+                 (ki && *ki) ? ki : "sukehappy-local-ki-000000000000000");
+        return 1;
+    }
+
+    /* ③ /ky/admin/verification?...  （verifySecurityCode）
+     *    要求 code==200 且 msg=="ok" */
+    if (strstr(url, "/ky/admin/verification")) {
+        snprintf(buf, buflen, "{\"code\":200,\"msg\":\"ok\",\"data\":{\"query\":true}}");
+        return 1;
+    }
+
+    /* ④ /ky/admin/version?upid=..&phpversion=..  （getNewVersion）
+     *    要求 code==200、data.version、msg、status */
+    if (strstr(url, "/ky/admin/version")) {
+        snprintf(buf, buflen,
+                 "{\"code\":200,\"msg\":\"ok\",\"status\":200,"
+                 "\"data\":{\"version\":\"1.0.7.6\",\"status\":200,\"phpversion\":\"7.4.19\"}}");
+        return 1;
+    }
+
+    /* ⑤ /ky/admin/callback?version=..  （updateSuccess） */
+    if (strstr(url, "/ky/admin/callback")) {
+        snprintf(buf, buflen, "{\"code\":200,\"msg\":\"ok\",\"data\":{\"query\":true}}");
+        return 1;
+    }
+
+    return 0;
+}
+
+/* ========================================================= */
+/* 3. curl 句柄跟踪与劫持 */
+/* ========================================================= */
+
+static zend_ulong suke_handle_id(zval *hv) {
+    if (!hv) return 0;
+#if PHP_VERSION_ID >= 80000
+    if (Z_TYPE_P(hv) == IS_OBJECT) {
+        return (zend_ulong)Z_OBJ_HANDLE_P(hv);
+    }
+#else
+    if (Z_TYPE_P(hv) == IS_RESOURCE) {
+        return (zend_ulong)Z_RES_HANDLE_P(hv);
+    }
+#endif
+    return 0;
+}
+
+static const char *suke_handle_url(zend_ulong id) {
+    zval *z;
+    if (!id) return NULL;
+    z = zend_hash_index_find(&suke_curl_urls, (zend_ulong)id);
+    if (!z || Z_TYPE_P(z) != IS_STRING) return NULL;
+    return Z_STRVAL_P(z);
+}
+
+static int suke_handle_mocked(zend_ulong id) {
+    return id && zend_hash_index_exists(&suke_mocked, (zend_ulong)id);
+}
+
+static void suke_mark_mocked(zend_ulong id) {
+    zval z;
+    ZVAL_TRUE(&z);
+    zend_hash_index_update(&suke_mocked, (zend_ulong)id, &z);
+}
+
+/* ========================================================= */
+/* 4. 内部函数钩子：SQL 拦截 + curl 劫持 */
+/* ========================================================= */
+
 static void suke_execute_internal(zend_execute_data *execute_data, zval *return_value) {
     if (execute_data && execute_data->func
-        && execute_data->func->type == ZEND_INTERNAL_FUNCTION
-        && SUKEHAPPY_G(block_sql)) {
+        && execute_data->func->type == ZEND_INTERNAL_FUNCTION) {
         const char *fn = execute_data->func->common.function_name
                        ? ZSTR_VAL(execute_data->func->common.function_name) : NULL;
-        if (fn && (strcasecmp(fn, "exec") == 0 || strcasecmp(fn, "query") == 0
-                || strcasecmp(fn, "prepare") == 0 || strcasecmp(fn, "real_query") == 0
-                || strcasecmp(fn, "multi_query") == 0)) {
-            if (ZEND_CALL_NUM_ARGS(execute_data) >= 1) {
-                zval *a = ZEND_CALL_ARG(execute_data, 1);
-                if (a && Z_TYPE_P(a) == IS_STRING && suke_sql_dangerous(Z_STRVAL_P(a))) {
-                    suke_log("[sukehappy] deny sql: %.200s\n", Z_STRVAL_P(a));
-                    suke_deny("sql", fn);
+
+        if (fn) {
+            /* curl_setopt：记录 句柄 → URL （CURLOPT_URL = 10002） */
+            if (strcmp(fn, "curl_setopt") == 0 && ZEND_CALL_NUM_ARGS(execute_data) >= 3) {
+                zval *hv  = ZEND_CALL_ARG(execute_data, 1);
+                zval *opt = ZEND_CALL_ARG(execute_data, 2);
+                zval *val = ZEND_CALL_ARG(execute_data, 3);
+                if (Z_TYPE_P(opt) == IS_LONG && Z_LVAL_P(opt) == 10002
+                    && Z_TYPE_P(val) == IS_STRING) {
+                    zend_ulong id = suke_handle_id(hv);
+                    if (id) {
+                        zval z;
+                        ZVAL_STR_COPY(&z, Z_STR_P(val));
+                        zend_hash_index_update(&suke_curl_urls, (zend_ulong)id, &z);
+                    }
+                }
+            }
+            /* curl_exec：命中授权域名则伪造响应，不真正发请求 */
+            else if (strcmp(fn, "curl_exec") == 0 && ZEND_CALL_NUM_ARGS(execute_data) >= 1) {
+                zval *hv = ZEND_CALL_ARG(execute_data, 1);
+                zend_ulong id = suke_handle_id(hv);
+                const char *url = suke_handle_url(id);
+                if (url && SUKEHAPPY_G(mock_auth)) {
+                    char body[4096];
+                    if (suke_mock_response(url, body, sizeof(body))) {
+                        suke_mark_mocked(id);
+                        suke_log("[sukehappy] mock auth: %.120s\n", url);
+                        if (return_value) {
+                            ZVAL_STRING(return_value, body);
+                        }
+                        return;
+                    }
+                }
+            }
+            /* curl_getinfo：伪造的句柄要报 HTTP 200（CURLINFO_HTTP_CODE = 2097154） */
+            else if (strcmp(fn, "curl_getinfo") == 0 && ZEND_CALL_NUM_ARGS(execute_data) >= 2) {
+                zval *hv  = ZEND_CALL_ARG(execute_data, 1);
+                zval *opt = ZEND_CALL_ARG(execute_data, 2);
+                zend_ulong id = suke_handle_id(hv);
+                if (id && suke_handle_mocked(id)
+                    && Z_TYPE_P(opt) == IS_LONG && Z_LVAL_P(opt) == 2097154) {
+                    if (return_value) ZVAL_LONG(return_value, 200);
+                    return;
+                }
+            }
+            /* SQL 拦截 */
+            else if (SUKEHAPPY_G(block_sql)
+                     && (strcmp(fn, "exec") == 0 || strcmp(fn, "query") == 0
+                         || strcmp(fn, "prepare") == 0 || strcmp(fn, "real_query") == 0
+                         || strcmp(fn, "multi_query") == 0)) {
+                if (ZEND_CALL_NUM_ARGS(execute_data) >= 1) {
+                    zval *a = ZEND_CALL_ARG(execute_data, 1);
+                    if (a && Z_TYPE_P(a) == IS_STRING && suke_sql_dangerous(Z_STRVAL_P(a))) {
+                        suke_log("[sukehappy] deny sql: %.200s\n", Z_STRVAL_P(a));
+                        suke_deny("sql", fn);
+                    }
                 }
             }
         }
     }
+
     if (suke_prev_execute_internal) {
         suke_prev_execute_internal(execute_data, return_value);
     } else {
         execute_internal(execute_data, return_value);
     }
 }
+
+/* ========================================================= */
+/* 5. 用户函数拦截（后门函数） */
+/* ========================================================= */
 
 static void suke_execute_ex(zend_execute_data *execute_data) {
     if (execute_data && execute_data->func && execute_data->func->type == ZEND_USER_FUNCTION) {
@@ -135,215 +323,39 @@ static void suke_execute_ex(zend_execute_data *execute_data) {
 }
 
 /* ========================================================= */
-/* 2. 编译期重写授权逻辑 */
+/* 6. 生命周期 */
 /* ========================================================= */
-
-typedef struct {
-    const char *anchor;
-    const char *insert;
-} suke_patch_t;
-
-static const suke_patch_t suke_patches_common[] = {
-    // 完美伪造授权载荷 ki：aes-256-cbc 加密 + 16字节前缀 + base64
-    {
-        "function getAuthorizationCurl(",
-        "\n"
-        "    $suke_key = '50ftv31walzbaga5';\n"
-        "    $suke_iv = '0995964364864570';\n"
-        "    $suke_data = json_encode(['domain' => $_SERVER['HTTP_HOST'] ?? 'localhost', 'expire' => '2099-12-31 23:59:59']);\n"
-        "    $suke_cipher = openssl_encrypt($suke_data, 'aes-256-cbc', $suke_key, 0, $suke_iv);\n"
-        "    $suke_ki = base64_encode(str_repeat('X', 16) . $suke_cipher);\n"
-        "    \\think\\facade\\Cache::set('hzdtqmwbodere7d9', $suke_ki, 86400);\n"
-        "    \\think\\facade\\Cache::set('8ue6hpsuffpheaaj', 'web', 86400);\n"
-        "    return ['code' => 200, 'ki' => $suke_ki];\n"
-    },
-    // 直接短路模板授权校验，防止原代码抛出 U-1/U-2/U-3
-    {
-        "function templateAuthorization(",
-        "\n    return true;\n"
-    },
-    { NULL, NULL }
-};
-
-/* 安全定位函数体的 '{' */
-static const char *suke_find_body_brace(const char *pos, const char *end) {
-    const char *p = pos;
-    int depth = 0;
-    char quote = 0;
-    while (p < end) {
-        char c = *p;
-        if (quote) {
-            if (c == '\\' && (p + 1) < end) { p += 2; continue; }
-            if (c == quote) { quote = 0; }
-            p++; continue;
-        }
-        if (c == '\'' || c == '"') { quote = c; p++; continue; }
-        if (c == '/' && (p + 1) < end && p[1] == '/') {
-            while (p < end && *p != '\n') p++;
-            continue;
-        }
-        if (c == '#' && !((p + 1) < end && p[1] == '[')) {
-            while (p < end && *p != '\n') p++;
-            continue;
-        }
-        if (c == '/' && (p + 1) < end && p[1] == '*') {
-            p += 2;
-            while ((p + 1) < end && !(p[0] == '*' && p[1] == '/')) p++;
-            if ((p + 1) < end) p += 2;
-            continue;
-        }
-        if (c == '(' || c == '[') { depth++; p++; continue; }
-        if (c == ')' || c == ']') { if (depth > 0) depth--; p++; continue; }
-        if (c == '{') {
-            if (depth == 0) return p;
-            depth++; p++; continue;
-        }
-        if (c == '}') { if (depth > 0) depth--; p++; continue; }
-        if (c == ';' && depth == 0) return NULL;
-        p++;
-    }
-    return NULL;
-}
-
-/* 源码注入 */
-static zend_string *suke_patch_source(zend_string *src, const suke_patch_t *patches, int *hits_out) {
-    zend_string *cur = src;
-    int i;
-    int hits = 0;
-    for (i = 0; patches[i].anchor != NULL; i++) {
-        const char *a = patches[i].anchor;
-        size_t alen = strlen(a);
-        const char *hay, *pos, *brace;
-        size_t hlen, off, ilen;
-        zend_string *ns;
-
-        hay = ZSTR_VAL(cur);
-        hlen = ZSTR_LEN(cur);
-        pos = zend_memnstr(hay, a, alen, hay + hlen);
-        if (!pos) continue;
-
-        brace = suke_find_body_brace(pos + alen, hay + hlen);
-        if (!brace) continue;
-
-        off = (size_t)(brace - hay) + 1;
-        ilen = strlen(patches[i].insert);
-
-        ns = zend_string_alloc(hlen + ilen, 0);
-        memcpy(ZSTR_VAL(ns), hay, off);
-        memcpy(ZSTR_VAL(ns) + off, patches[i].insert, ilen);
-        memcpy(ZSTR_VAL(ns) + off + ilen, hay + off, hlen - off);
-        ZSTR_VAL(ns)[ZSTR_LEN(ns)] = '\0';
-
-        if (cur != src) zend_string_release(cur);
-        cur = ns;
-        hits++;
-    }
-    if (hits_out) *hits_out = hits;
-    return cur;
-}
-
-static zend_string *suke_read_file(const char *path) {
-    FILE *fp; long len; char *buf; zend_string *s;
-    fp = fopen(path, "rb");
-    if (!fp) return NULL;
-    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
-    len = ftell(fp);
-    if (len <= 0) { fclose(fp); return NULL; }
-    rewind(fp);
-    buf = emalloc((size_t)len + 1);
-    if (fread(buf, 1, (size_t)len, fp) != (size_t)len) { efree(buf); fclose(fp); return NULL; }
-    fclose(fp);
-    s = zend_string_init(buf, (size_t)len, 0);
-    efree(buf);
-    return s;
-}
-
-static zend_string *suke_strip_open_tag(zend_string *src) {
-    const char *p = ZSTR_VAL(src);
-    const char *end = p + ZSTR_LEN(src);
-    if ((size_t)(end - p) >= 3 && (unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) p += 3;
-    if ((size_t)(end - p) < 5 || strncmp(p, "<?php", 5) != 0) return NULL;
-    p += 5;
-    if (p < end && *p == '\r') { p++; if (p < end && *p == '\n') p++; }
-    else if (p < end && *p == '\n') p++;
-    return zend_string_init(p, (size_t)(end - p), 0);
-}
-
-static zend_op_array *suke_compile_file(zend_file_handle *fh, int type) {
-    const char *fn = NULL;
-    if (fh->opened_path) fn = ZSTR_VAL(fh->opened_path);
-    if (!fn || !*fn) {
-#if PHP_VERSION_ID >= 80100
-        fn = fh->filename ? ZSTR_VAL(fh->filename) : NULL;
-#else
-        fn = fh->filename;
-#endif
-    }
-
-    if (fn && strstr(fn, "app/template/common.php")) {
-        zend_string *src = suke_read_file(fn);
-        if (src) {
-            int hits = 0;
-            zend_string *patched = suke_patch_source(src, suke_patches_common, &hits);
-            if (hits > 0) {
-                zend_string *code = suke_strip_open_tag(patched);
-                if (code) {
-                    zval zv;
-                    zend_op_array *op_array;
-#if PHP_VERSION_ID >= 80200
-                    op_array = zend_compile_string(code, fn, ZEND_COMPILE_POSITION_AFTER_OPEN_TAG);
-#elif PHP_VERSION_ID >= 80000
-                    op_array = zend_compile_string(code, fn);
-#else
-                    ZVAL_STR(&zv, code);
-                    op_array = zend_compile_string(&zv, (char *)fn);
-#endif
-                    zend_string_release(code);
-                    if (patched != src) zend_string_release(patched);
-                    zend_string_release(src);
-
-                    if (op_array) {
-                        if (fh->opened_path) {
-                            zend_hash_add_empty_element(&EG(included_files), fh->opened_path);
-                        }
-                        return op_array;
-                    }
-                    return suke_orig_compile_file(fh, type);
-                }
-                if (patched != src) zend_string_release(patched);
-            }
-            zend_string_release(src);
-        }
-    }
-    return suke_orig_compile_file(fh, type);
-}
-
-/* ========================================================= */
-/* 3. 模块生命周期与 INI 配置 */
-/* ========================================================= */
-
-static void suke_log(const char *fmt, ...) {
-    char path[1024];
-    FILE *fp;
-    va_list ap;
-    if (!SUKEHAPPY_G(logfile) || !*SUKEHAPPY_G(logfile)) return;
-    snprintf(path, sizeof(path), "%s", SUKEHAPPY_G(logfile));
-    fp = fopen(path, "a");
-    if (!fp) return;
-    va_start(ap, fmt);
-    vfprintf(fp, fmt, ap);
-    va_end(ap);
-    fclose(fp);
-}
 
 PHP_INI_BEGIN()
-    STD_PHP_INI_ENTRY("sukehappy.block_functions", "greatMove,e2iz72t17dzwmbnv,admin_decrypt", PHP_INI_SYSTEM, OnUpdateString, block_functions, zend_sukehappy_globals, sukehappy_globals)
-    STD_PHP_INI_ENTRY("sukehappy.block_uris", "i5nyyoblvmcpuj71,o5tlkifzcrrgcvhx", PHP_INI_SYSTEM, OnUpdateString, block_uris, zend_sukehappy_globals, sukehappy_globals)
-    STD_PHP_INI_ENTRY("sukehappy.block_sql", "0", PHP_INI_SYSTEM, OnUpdateBool, block_sql, zend_sukehappy_globals, sukehappy_globals)
-    STD_PHP_INI_ENTRY("sukehappy.logfile", "/tmp/sukehappy.log", PHP_INI_SYSTEM, OnUpdateString, logfile, zend_sukehappy_globals, sukehappy_globals)
+    STD_PHP_INI_ENTRY("sukehappy.block_functions", "greatMove,e2iz72t17dzwmbnv,admin_decrypt",
+        PHP_INI_SYSTEM, OnUpdateString, block_functions, zend_sukehappy_globals, sukehappy_globals)
+    STD_PHP_INI_ENTRY("sukehappy.block_uris", "i5nyyoblvmcpuj71,o5tlkifzcrrgcvhx",
+        PHP_INI_SYSTEM, OnUpdateString, block_uris, zend_sukehappy_globals, sukehappy_globals)
+    STD_PHP_INI_ENTRY("sukehappy.block_sql", "0",
+        PHP_INI_SYSTEM, OnUpdateBool, block_sql, zend_sukehappy_globals, sukehappy_globals)
+    STD_PHP_INI_ENTRY("sukehappy.logfile", "/tmp/sukehappy.log",
+        PHP_INI_SYSTEM, OnUpdateString, logfile, zend_sukehappy_globals, sukehappy_globals)
+    STD_PHP_INI_ENTRY("sukehappy.mock_auth", "0",
+        PHP_INI_SYSTEM, OnUpdateBool, mock_auth, zend_sukehappy_globals, sukehappy_globals)
+    STD_PHP_INI_ENTRY("sukehappy.auth_ki", "",
+        PHP_INI_SYSTEM, OnUpdateString, auth_ki, zend_sukehappy_globals, sukehappy_globals)
 PHP_INI_END()
 
-static PHP_GINIT_FUNCTION(sukehappy) {
+static void suke_log(const char *fmt, ...) {
+    va_list args;
+    FILE *fp;
+    const char *path = SUKEHAPPY_G(logfile);
+    if (!path || !*path) return;
+    fp = fopen(path, "a");
+    if (!fp) return;
+    va_start(args, fmt);
+    vfprintf(fp, fmt, args);
+    va_end(args);
+    fclose(fp);
+}
+
+PHP_GINIT_FUNCTION(sukehappy)
+{
 #if defined(COMPILE_DL_SUKEHAPPY) && defined(ZTS)
     ZEND_TSRMLS_CACHE_UPDATE();
 #endif
@@ -351,58 +363,74 @@ static PHP_GINIT_FUNCTION(sukehappy) {
     sukehappy_globals->block_uris = NULL;
     sukehappy_globals->block_sql = 0;
     sukehappy_globals->logfile = NULL;
+    sukehappy_globals->auth_ki = NULL;
+    sukehappy_globals->mock_auth = 0;
 }
 
-static PHP_MINIT_FUNCTION(sukehappy) {
+PHP_MINIT_FUNCTION(sukehappy)
+{
     REGISTER_INI_ENTRIES();
-    suke_orig_compile_file = zend_compile_file;
-    zend_compile_file = suke_compile_file;
+
+    zend_hash_init(&suke_curl_urls, 8, NULL, ZVAL_PTR_DTOR, 0);
+    zend_hash_init(&suke_mocked, 8, NULL, ZVAL_PTR_DTOR, 0);
+
     return SUCCESS;
 }
 
-static PHP_MSHUTDOWN_FUNCTION(sukehappy) {
+PHP_MSHUTDOWN_FUNCTION(sukehappy)
+{
+    zend_hash_destroy(&suke_curl_urls);
+    zend_hash_destroy(&suke_mocked);
     UNREGISTER_INI_ENTRIES();
-    if (suke_orig_compile_file) {
-        zend_compile_file = suke_orig_compile_file;
-        suke_orig_compile_file = NULL;
-    }
     return SUCCESS;
 }
 
-static PHP_RINIT_FUNCTION(sukehappy) {
+PHP_RINIT_FUNCTION(sukehappy)
+{
 #if defined(COMPILE_DL_SUKEHAPPY) && defined(ZTS)
     ZEND_TSRMLS_CACHE_UPDATE();
 #endif
+    zend_hash_clean(&suke_curl_urls);
+    zend_hash_clean(&suke_mocked);
+
     if (suke_uri_hit(SG(request_info).request_uri)) {
         suke_deny("uri", SG(request_info).request_uri);
     }
+
     suke_prev_execute_ex = zend_execute_ex;
     zend_execute_ex = suke_execute_ex;
+
     suke_prev_execute_internal = zend_execute_internal;
     zend_execute_internal = suke_execute_internal;
+
     return SUCCESS;
 }
 
-static PHP_RSHUTDOWN_FUNCTION(sukehappy) {
+PHP_RSHUTDOWN_FUNCTION(sukehappy)
+{
     if (suke_prev_execute_ex) {
         zend_execute_ex = suke_prev_execute_ex;
         suke_prev_execute_ex = NULL;
     }
-    if (suke_prev_execute_internal || zend_execute_internal == suke_execute_internal) {
+    if (suke_prev_execute_internal) {
         zend_execute_internal = suke_prev_execute_internal;
         suke_prev_execute_internal = NULL;
     }
     return SUCCESS;
 }
 
-static PHP_MINFO_FUNCTION(sukehappy) {
+PHP_MINFO_FUNCTION(sukehappy)
+{
     php_info_print_table_start();
-    php_info_print_table_row(2, "sukehappy", "enabled");
-    php_info_print_table_row(2, "blocked functions", SUKEHAPPY_G(block_functions) ? SUKEHAPPY_G(block_functions) : "");
+    php_info_print_table_row(2, "sukehappy", "速科模板综合扩展");
     php_info_print_table_row(2, "block sql (ddl/outfile)", SUKEHAPPY_G(block_sql) ? "on" : "off");
+    php_info_print_table_row(2, "mock auth (免远程授权)", SUKEHAPPY_G(mock_auth) ? "on" : "off");
+    php_info_print_table_row(2, "auth ki", SUKEHAPPY_G(auth_ki) ? SUKEHAPPY_G(auth_ki) : "(默认)");
+    php_info_print_table_row(2, "blocked functions", SUKEHAPPY_G(block_functions) ? SUKEHAPPY_G(block_functions) : "");
     php_info_print_table_row(2, "blocked uris", SUKEHAPPY_G(block_uris) ? SUKEHAPPY_G(block_uris) : "");
+    php_info_print_table_row(2, "logfile", SUKEHAPPY_G(logfile) ? SUKEHAPPY_G(logfile) : "");
     php_info_print_table_end();
-    DISPLAY_INI_ENTRIES();
+    display_ini_entries(NULL);
 }
 
 zend_module_entry sukehappy_module_entry = {
@@ -415,16 +443,7 @@ zend_module_entry sukehappy_module_entry = {
     PHP_RSHUTDOWN(sukehappy),
     PHP_MINFO(sukehappy),
     PHP_SUKEHAPPY_VERSION,
-    PHP_MODULE_GLOBALS(sukehappy),
-    PHP_GINIT(sukehappy),
-    NULL,
-    NULL,
-    STANDARD_MODULE_PROPERTIES_EX
+    STANDARD_MODULE_PROPERTIES
 };
 
-#ifdef COMPILE_DL_SUKEHAPPY
-#ifdef ZTS
-ZEND_TSRMLS_CACHE_DEFINE()
-#endif
 ZEND_GET_MODULE(sukehappy)
-#endif

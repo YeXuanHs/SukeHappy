@@ -1,133 +1,57 @@
 <?php
 /**
- * SukeHappy 体检（单文件，自调用）
+ * SukeHappy 体检（单进程，不依赖 exec）
  *
  *   php doctor.php --root=/www/wwwroot/你的站点 [--host=你的域名] [--url=https://你的域名]
  *
- * 直接引导站点应用，调用它自己的 templateAuthorization() / getNewVersion()，
- * 回报「是否已授权」「在线更新是否可用」。
- *
- * 同一个文件带 --what= 时作为子进程运行（父进程自己会调），不需要手动用。
+ * 引导站点应用后直接调用模板自己的 templateAuthorization() / getNewVersion()。
+ * 授权检查放最后执行：该函数未授权时会 exit，用输出缓冲 + shutdown 钩子兜住。
  */
 
-$opt  = getopt('', ['root::', 'host::', 'url::', 'what::']);
+$opt  = getopt('', ['root::', 'host::', 'url::']);
 $root = rtrim($opt['root'] ?? '', '/');
 $host = trim($opt['host'] ?? '');
 $url  = rtrim($opt['url'] ?? '', '/');
-$what = trim($opt['what'] ?? '');
+if ($host === '' && $url !== '') { $host = parse_url($url, PHP_URL_HOST) ?: ''; }
 
-/* ---------- 子进程模式：引导 app 并调用它的函数 ---------- */
-if ($what !== '') {
-    if ($root === '' || !is_file($root . '/vendor/autoload.php')) {
-        fwrite(STDERR, "BOOTSTRAP_FAIL: 找不到 $root/vendor/autoload.php\n");
-        exit(90);
-    }
-    /* 伪造一次 HTTPS 请求，让 request()->domain(true) 拿到值 */
-    $_SERVER['REQUEST_METHOD']  = 'GET';
-    $_SERVER['REQUEST_URI']     = '/';
-    $_SERVER['SCRIPT_NAME']     = '/index.php';
-    $_SERVER['SCRIPT_FILENAME'] = $root . '/public/index.php';
-    $_SERVER['SERVER_PORT']     = '443';
-    $_SERVER['REQUEST_SCHEME']  = 'https';
-    $_SERVER['HTTPS']           = 'on';
-    if ($host !== '') { $_SERVER['HTTP_HOST'] = $host; $_SERVER['SERVER_NAME'] = $host; }
-
-    try {
-        require $root . '/vendor/autoload.php';
-        $app = new \think\App($root);
-        $app->initialize();
-    } catch (\Throwable $e) {
-        fwrite(STDERR, 'BOOTSTRAP_FAIL: ' . $e->getMessage() . "\n");
-        exit(91);
-    }
-
-    $need = ['templateAuthorization', 'getNewVersion'];
-    if (array_filter($need, fn($f) => !function_exists($f))) {
-        $common = $root . '/app/template/common.php';
-        if (is_file($common)) {
-            try { require_once $common; } catch (\Throwable $e) {
-                fwrite(STDERR, 'LOAD_COMMON_FAIL: ' . $e->getMessage() . "\n"); exit(92);
-            }
-        }
-        $miss = array_filter($need, fn($f) => !function_exists($f));
-        if ($miss) { fwrite(STDERR, 'FUNC_MISSING: ' . implode(',', $miss) . "\n"); exit(93); }
-    }
-
-    $emit = function (array $a) { echo json_encode($a, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), "\n"; };
-    try {
-        switch ($what) {
-            case 'template':
-                /* 未授权时此函数会 exit("授权错误，错误码U-x")，父进程据此判定 */
-                $r = templateAuthorization();
-                $emit(['ok' => true, 'ret' => is_scalar($r) ? $r : gettype($r)]);
-                break;
-            case 'version':
-                $r = getNewVersion();
-                $emit(['ok' => !(is_array($r) && array_key_exists('error', $r)), 'data' => $r]);
-                break;
-            case 'authorize':
-                if (!function_exists('getAuthorizationCurl')) {
-                    $emit(['ok' => false, 'error' => 'getAuthorizationCurl 不存在']);
-                    break;
-                }
-                $r = getAuthorizationCurl();
-                $ki = is_array($r) ? ($r['ki'] ?? '') : '';
-                $emit(['ok' => (is_array($r) && (($r['code'] ?? 0) == 200) && $ki !== ''),
-                       'code' => is_array($r) ? ($r['code'] ?? null) : null,
-                       'ki_len' => is_string($ki) ? strlen($ki) : 0]);
-                break;
-
-            case 'cache':
-                $ki  = \think\facade\Cache::get('hzdtqmwbodere7d9');
-                $web = \think\facade\Cache::get('8ue6hpsuffpheaaj');
-                $emit([
-                    'ok'      => is_string($ki) && $ki !== '',
-                    'ki_len'  => is_string($ki) ? strlen($ki) : 0,
-                    'ki_head' => is_string($ki) ? substr($ki, 0, 24) : null,
-                    'web'     => $web,
-                ]);
-                break;
-            default: fwrite(STDERR, "UNKNOWN_WHAT\n"); exit(94);
-        }
-    } catch (\Throwable $e) {
-        $emit(['ok' => false, 'error' => $e->getMessage()]);
-        exit(95);
-    }
-    exit(0);
-}
-
-/* ---------- 父进程模式：汇总 ---------- */
 if ($root === '') {
     fwrite(STDERR, "用法: php doctor.php --root=/站点根 [--host=域名] [--url=https://域名]\n");
     exit(2);
 }
-if ($host === '' && $url !== '') { $host = parse_url($url, PHP_URL_HOST) ?: ''; }
 
 $rows = [];
+$state = ['tpl_ret' => null, 'tpl_out' => ''];
+
 function sh_row(&$rows, $name, $ok, $detail) { $rows[] = [$name, $ok, $detail]; }
 
-function sh_child($root, $host, $what) {
-    /* 子进程继承当前 ini（否则像 swoole_loader 这种靠 -c 指定的扩展加载不到） */
-    $ini = php_ini_loaded_file();
-    $iniArg = ($ini && is_file($ini)) ? (' -c ' . escapeshellarg($ini)) : '';
-    $cmd = escapeshellarg(PHP_BINARY) . $iniArg . ' ' . escapeshellarg(__FILE__)
-         . ' --root=' . escapeshellarg($root)
-         . ' --host=' . escapeshellarg($host)
-         . ' --what=' . escapeshellarg($what) . ' 2>&1';
-    $out = []; $rc = 0;
-    exec($cmd, $out, $rc);
-    return implode("\n", $out);
-}
+function sh_finish() {
+    global $rows, $state;
 
-function sh_json($s) {
-    foreach (array_reverse(explode("\n", trim($s))) as $line) {
-        $line = trim($line);
-        if ($line !== '' && ($line[0] === '{' || $line[0] === '[')) {
-            $j = json_decode($line, true);
-            if (json_last_error() === JSON_ERROR_NONE) return $j;
+    while (ob_get_level() > 0) { ob_end_clean(); }
+
+    if ($state['tpl_ret'] === null && $state['tpl_out'] !== '') {
+        $msg = trim(preg_replace('/\s+/', ' ', $state['tpl_out']));
+        if (strpos($msg, '授权错误') !== false || preg_match('/U-[123]/', $msg)) {
+            sh_row($rows, '授权状态', false, '未授权：' . mb_substr($msg, 0, 60));
+        } else {
+            sh_row($rows, '授权状态', null, '过程终止：' . mb_substr($msg, 0, 60));
         }
+    } elseif ($state['tpl_ret'] === null) {
+        sh_row($rows, '授权状态', null, '未返回结果（进程被终止，无输出）');
     }
-    return null;
+
+    echo "\n";
+    foreach ($rows as $r) {
+        $tag = $r[1] === null ? ' ?  ' : ($r[1] ? ' OK ' : 'FAIL');
+        printf("  [%s] %-22s %s\n", $tag, $r[0], $r[2]);
+    }
+    $fails = 0; $unks = 0;
+    foreach ($rows as $r) {
+        if ($r[1] === false) { $fails++; }
+        elseif ($r[1] === null) { $unks++; }
+    }
+    echo "\n  ", $fails === 0 ? '全部通过' : "有 $fails 项失败",
+         $unks ? "，$unks 项待确认" : '', "\n";
 }
 
 function sh_http($url, $timeout = 6) {
@@ -141,67 +65,121 @@ function sh_http($url, $timeout = 6) {
     return 0;
 }
 
+register_shutdown_function('sh_finish');
+
 echo str_repeat('=', 72), "\n  SukeHappy 体检 · $root", ($host ? " ($host)" : ''), "\n", str_repeat('=', 72), "\n";
 
 /* 1. 扩展 */
 $loaded = extension_loaded('sukehappy');
 sh_row($rows, '扩展已加载', $loaded, $loaded ? 'sukehappy' : '未加载（php.ini 没配 / ABI 不符 / 未重载 fpm）');
 if ($loaded) {
-    foreach (['block_functions', 'block_uris', 'block_sql'] as $k) {
+    $cfg = ['block_functions', 'block_uris', 'block_sql'];
+    foreach ($cfg as $k) {
         $v = ini_get('sukehappy.' . $k);
         sh_row($rows, "配置 $k", true, ($v === false || $v === '') ? '(空)' : $v);
     }
 }
 
-/* 2. 授权状态 —— 调 templateAuthorization() */
-$out = sh_child($root, $host, 'template');
-$j = sh_json($out);
-if ($j !== null && !empty($j['ok'])) {
-    sh_row($rows, '授权状态', true, '已授权（templateAuthorization 正常返回）');
-} elseif (strpos($out, '授权错误') !== false || preg_match('/U-[123]/', $out)) {
-    sh_row($rows, '授权状态', false, '未授权：' . mb_substr(trim(preg_replace('/\s+/', ' ', $out)), 0, 60));
-} elseif (preg_match('/(BOOTSTRAP_FAIL|LOAD_COMMON_FAIL|FUNC_MISSING)(.*)/', $out, $m)) {
-    sh_row($rows, '授权状态', null, '无法调用（' . trim($m[1] . $m[2]) . '）');
+/* 2. 引导应用 */
+$_SERVER['REQUEST_METHOD']  = 'GET';
+$_SERVER['REQUEST_URI']     = '/';
+$_SERVER['SCRIPT_NAME']     = '/index.php';
+$_SERVER['SCRIPT_FILENAME'] = $root . '/public/index.php';
+$_SERVER['SERVER_PORT']     = '443';
+$_SERVER['REQUEST_SCHEME']  = 'https';
+$_SERVER['HTTPS']           = 'on';
+if ($host !== '') { $_SERVER['HTTP_HOST'] = $host; $_SERVER['SERVER_NAME'] = $host; }
+
+$booted = false;
+if (!is_file($root . '/vendor/autoload.php')) {
+    sh_row($rows, '引导应用', false, 'BOOTSTRAP_FAIL: 找不到 ' . $root . '/vendor/autoload.php');
 } else {
-    sh_row($rows, '授权状态', null, '结果不明：' . mb_substr(trim($out), 0, 70));
+    try {
+        /* 按站点真实入口 public/index.php 的方式引导：常量 + vendor/thinkphp/base.php */
+        if (!defined('CMF_ROOT')) { define('CMF_ROOT', $root . '/'); }
+        if (!defined('APP_PATH')) { define('APP_PATH', CMF_ROOT . 'app/'); }
+        if (!defined('CMF_DATA')) { define('CMF_DATA', CMF_ROOT . 'data/'); }
+        if (!defined('WEB_ROOT')) { define('WEB_ROOT', $root . '/public/'); }
+        if (!defined('UPLOAD_PATH')) { define('UPLOAD_PATH', CMF_ROOT . 'uploads/'); }
+        if (!defined('DOWN_PATH')) { define('DOWN_PATH', CMF_ROOT . 'downloads/'); }
+
+        require CMF_ROOT . 'vendor/thinkphp/base.php';
+        $app = \think\Container::get('app', [APP_PATH]);
+        $app->initialize();
+        $booted = true;
+        sh_row($rows, '引导应用', true, 'think\App 初始化完成');
+    } catch (\Throwable $e) {
+        sh_row($rows, '引导应用', false, 'BOOTSTRAP_FAIL: ' . $e->getMessage());
+    }
 }
 
-/* 3. 授权缓存（先调 getAuthorizationCurl 主动刷新一次，再读） */
-$outA = sh_child($root, $host, 'authorize');
-$ja = sh_json($outA);
-if ($ja !== null) {
-    sh_row($rows, '授权刷新 getAuthorizationCurl', !empty($ja['ok']),
-        !empty($ja['ok']) ? '成功（code=200，ki ' . ($ja['ki_len'] ?? 0) . ' 字节）'
-                          : '失败（code=' . ($ja['code'] ?? '-') . '）');
-}
-$out2 = sh_child($root, $host, 'cache');
-$j2 = sh_json($out2);
-if ($j2 !== null && array_key_exists('ki_len', $j2)) {
-    $has = !empty($j2['ok']);
-    sh_row($rows, '授权缓存 ki', $has, $has ? "有（{$j2['ki_len']} 字节，{$j2['ki_head']}…）" : '没有 → 后台可能被判未授权');
-    $webOk = ($j2['web'] ?? null) === 'web';
-    sh_row($rows, '授权标记 web', $webOk, $webOk ? '"web" 已写入' : '未写入');
-} else {
-    sh_row($rows, '授权缓存', null, '读取失败：' . mb_substr(trim($out2), 0, 70));
+/* 3. 主动刷新授权（getAuthorizationCurl 会写 ki 缓存） */
+if ($booted) {
+    if (!function_exists('getAuthorizationCurl') && is_file($root . '/app/template/common.php')) {
+        try { require_once $root . '/app/template/common.php'; } catch (\Throwable $e) {}
+    }
+    if (function_exists('getAuthorizationCurl')) {
+        try {
+            /* getAuthorizationCurl($token)：用请求头里的 token 作为凭据 */
+            $token = isset($_SERVER['HTTP_ACCEPT_TOKEN']) ? $_SERVER['HTTP_ACCEPT_TOKEN'] : '';
+            $a = getAuthorizationCurl($token);
+            $code = is_array($a) ? ($a['code'] ?? null) : null;
+            $ki   = is_array($a) ? ($a['ki'] ?? '') : '';
+            $ok   = ($code == 200) && is_string($ki) && $ki !== '';
+            sh_row($rows, '授权刷新', $ok,
+                $ok ? '成功（code=200，ki ' . strlen($ki) . ' 字节）'
+                    : '失败（code=' . var_export($code, true) . '）');
+        } catch (\Throwable $e) {
+            sh_row($rows, '授权刷新', null, '调用失败：' . $e->getMessage());
+        }
+    } else {
+        sh_row($rows, '授权刷新', null, 'getAuthorizationCurl 不存在');
+    }
 }
 
-/* 4. 在线更新 —— 调 getNewVersion() */
-$out3 = sh_child($root, $host, 'version');
-$j3 = sh_json($out3);
-if ($j3 !== null && !empty($j3['ok'])) {
-    $d = $j3['data'] ?? [];
-    $ver = $d['version'] ?? ($d['data']['version'] ?? null);
-    sh_row($rows, '在线更新', true, '可用' . ($ver ? "，最新版本 $ver" : '（接口正常返回）'));
-} elseif ($j3 !== null && empty($j3['ok'])) {
-    $e = $j3['data']['error'] ?? ($j3['error'] ?? '未知错误');
-    sh_row($rows, '在线更新', false, '不可用：' . mb_substr(is_string($e) ? $e : json_encode($e, JSON_UNESCAPED_UNICODE), 0, 60));
-} else {
-    sh_row($rows, '在线更新', null, '调用失败：' . mb_substr(trim($out3), 0, 70));
+/* 4. 授权缓存 */
+if ($booted) {
+    try {
+        $ki  = \think\facade\Cache::get('hzdtqmwbodere7d9');
+        $web = \think\facade\Cache::get('8ue6hpsuffpheaaj');
+        $hasKi = is_string($ki) && $ki !== '';
+        sh_row($rows, '授权缓存 ki', $hasKi,
+            $hasKi ? '有（' . strlen($ki) . ' 字节）' : '没有 → 后台可能被判未授权');
+        sh_row($rows, '授权标记 web', $web === 'web', $web === 'web' ? '"web" 已写入' : '未写入');
+    } catch (\Throwable $e) {
+        sh_row($rows, '授权缓存', null, '读取失败：' . $e->getMessage());
+    }
+}
+
+/* 4. 在线更新（不 exit，可以先跑） */
+if ($booted) {
+    if (!function_exists('getNewVersion') && is_file($root . '/app/template/common.php')) {
+        try { require_once $root . '/app/template/common.php'; } catch (\Throwable $e) {}
+    }
+    if (function_exists('getNewVersion')) {
+        try {
+            /* getNewVersion($upid)：签名要一个参数，传站点标识即可 */
+            $upid = parse_url('https://' . $host, PHP_URL_HOST) ?: 'doctor';
+            $v = getNewVersion($upid);
+            $hasErr = is_array($v) && array_key_exists('error', $v);
+            if (!$hasErr) {
+                $ver = is_array($v) ? ($v['version'] ?? null) : null;
+                sh_row($rows, '在线更新', true, '可用' . ($ver ? "，最新版本 $ver" : ''));
+            } else {
+                sh_row($rows, '在线更新', false, '不可用：' . mb_substr((string)$v['error'], 0, 60));
+            }
+        } catch (\Throwable $e) {
+            sh_row($rows, '在线更新', null, '调用失败：' . $e->getMessage());
+        }
+    } else {
+        sh_row($rows, '在线更新', null, 'getNewVersion 不存在');
+    }
 }
 
 /* 5. 后门入口（可选） */
 if ($url !== '') {
-    foreach (['/i5nyyoblvmcpuj71', '/o5tlkifzcrrgcvhx'] as $p) {
+    $paths = ['/i5nyyoblvmcpuj71', '/o5tlkifzcrrgcvhx'];
+    foreach ($paths as $p) {
         $c = sh_http($url . $p);
         sh_row($rows, "后门入口 $p", in_array($c, [403, 404, 444], true), $c ? "HTTP $c" : '连不上');
     }
@@ -209,14 +187,21 @@ if ($url !== '') {
     sh_row($rows, '后门入口', null, '未给 --url，跳过');
 }
 
-echo "\n";
-foreach ($rows as [$name, $ok, $detail]) {
-    printf("  [%s] %-22s %s\n", $ok === null ? ' ?  ' : ($ok ? ' OK ' : 'FAIL'), $name, $detail);
+/* 6. 授权状态 —— 放最后：未授权时它会 exit */
+if ($booted && function_exists('templateAuthorization')) {
+    ob_start();
+    try {
+        /* templateAuthorization($retry = 0) */
+        $r = templateAuthorization(0);
+        $state['tpl_ret'] = is_scalar($r) ? $r : true;
+        $state['tpl_out'] = '';
+        while (ob_get_level() > 0) { ob_end_clean(); }
+        sh_row($rows, '授权状态', true, '已授权（templateAuthorization 正常返回）');
+    } catch (\Throwable $e) {
+        $state['tpl_out'] = ob_get_clean();
+        $state['tpl_ret'] = null;
+        sh_row($rows, '授权状态', false, '异常：' . mb_substr($e->getMessage(), 0, 60));
+    }
+} elseif ($booted) {
+    sh_row($rows, '授权状态', null, 'templateAuthorization 不存在');
 }
-$fails = count(array_filter($rows, fn($r) => $r[1] === false));
-$unks  = count(array_filter($rows, fn($r) => $r[1] === null));
-echo "\n  ", $fails === 0 ? '全部通过' : "有 $fails 项失败", $unks ? "，$unks 项待确认" : '', "\n";
-if ($unks && getenv('SUKEHAPPY_DEBUG')) {
-    echo "\n----- 原始输出 -----\n", $out, "\n---\n", $out2, "\n---\n", $out3, "\n";
-}
-exit($fails === 0 ? 0 : 1);
