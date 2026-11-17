@@ -232,9 +232,10 @@ zend_module_entry sukehappy_module_entry = {
     STANDARD_MODULE_PROPERTIES
 };
 
-#ifdef COMPILE_DL_SUKEHAPPY
+/* 无条件导出 get_module：config.m4 的 COMPILE_DL_SUKEHAPPY 在某些
+ * 构建下不会定义，用 #ifdef 包起来会导致 .so 缺少 get_module 符号，
+ * PHP 加载时报 "Invalid library (maybe not a PHP library)"。 */
 #ifdef ZTS
 ZEND_TSRMLS_CACHE_DEFINE()
 #endif
 ZEND_GET_MODULE(sukehappy)
-#endif
