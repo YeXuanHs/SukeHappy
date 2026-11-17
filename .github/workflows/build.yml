@@ -9,114 +9,96 @@ on:
 
 jobs:
   build:
-    name: php-${{ matrix.php }}
+    name: php-7.4
     runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        php: ['7.1', '7.2', '7.3', '7.4']
 
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build in php:${{ matrix.php }}-cli
-        run: |
-          set -eux
-          docker run --rm -v "$PWD":/src -w /src php:${{ matrix.php }}-cli sh -c '
-            set -e
-            if ! command -v autoconf >/dev/null 2>&1; then
-              apt-get update -qq && apt-get install -y -qq --no-install-recommends autoconf gcc make libc-dev pkg-config >/dev/null
-            fi
-            php -v
-            phpize
-            ./configure --with-php-config="$(which php-config)"
-            make -j"$(nproc)"
-            ls -l modules/sukehappy.so
-          '
-
-      - name: Smoke test (function guard)
-        run: |
-          set -eux
-          docker run --rm -v "$PWD":/src -w /src php:${{ matrix.php }}-cli sh -c '
-            php -d extension=/src/modules/sukehappy.so -r "
-              function greatMove(){ echo \"SHOULD_NOT_PRINT\n\"; }
-              greatMove();
-              echo \"AFTER\n\";
-            " > /src/out.txt 2>&1 || true
-            cat /src/out.txt
-            if grep -q SHOULD_NOT_PRINT /src/out.txt; then exit 1; fi
-            if grep -q AFTER /src/out.txt; then exit 1; fi
-            echo "blocked OK"
-          '
-          # 普通代码不能被影响
-          docker run --rm -v "$PWD":/src -w /src php:${{ matrix.php }}-cli sh -c '
-            php -d extension=/src/modules/sukehappy.so -r "echo \"NORMAL-OK\n\";" | grep -q NORMAL-OK
-          '
-
-      - name: Rename artifact
-        run: |
-          set -eux
-          VER="${{ matrix.php }}"
-          cp modules/sukehappy.so "sukehappy-${VER}-nts-linux-x86_64.so"
-          ls -l sukehappy-*.so
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sukehappy-php${{ matrix.php }}
-          path: sukehappy-*-nts-linux-x86_64.so
-          if-no-files-found: error
-
-  sql-guard:
-    name: sql-guard (php-7.4)
-    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '7.4'
-          extensions: pdo_sqlite
+          extensions: curl
           coverage: none
 
-      - name: Build
+      - name: Compile
+        working-directory: sukehappy4.0
         run: |
           set -eux
           phpize
           ./configure --with-php-config="$(which php-config)"
           make -j"$(nproc)"
+          ls -l modules/sukehappy.so
 
-      - name: SQL layer assertions
+      - name: Smoke test · auth mark
         run: |
           set -eux
-          EXT="$PWD/modules/sukehappy.so"
-          # 默认（block_sql=0）必须放行 DROP，避免误伤卸载/导入
-          php -d extension="$EXT" -r '
-            $p = new PDO("sqlite::memory:");
-            $p->exec("CREATE TABLE t(a int)");
-            $p->exec("DROP TABLE t");
-            echo "DROP_ALLOWED_BY_DEFAULT\n";
-          ' | tee a.txt
-          grep -q DROP_ALLOWED_BY_DEFAULT a.txt
-          # 手动开启后必须拦 DROP
-          php -d extension="$EXT" -d sukehappy.block_sql=1 -r '
-            $p = new PDO("sqlite::memory:");
-            $p->exec("CREATE TABLE t(a int)");
-            $p->exec("DROP TABLE t");
-            echo "DROP_PASSED\n";
-          ' > b.txt 2>&1 || true
-          if grep -q DROP_PASSED b.txt; then echo "::error::DROP not blocked"; exit 1; fi
-          # 手动开启后必须拦 INTO OUTFILE
-          php -d extension="$EXT" -d sukehappy.block_sql=1 -r '
-            $p = new PDO("sqlite::memory:");
-            $p->exec("SELECT 1 INTO OUTFILE \"x\"");
-            echo "OUTFILE_PASSED\n";
-          ' > c.txt 2>&1 || true
-          if grep -q OUTFILE_PASSED c.txt; then echo "::error::OUTFILE not blocked"; exit 1; fi
-          echo "sql guard OK"
+          EXT="$PWD/sukehappy4.0/modules/sukehappy.so"
+          rm -rf /tmp/site && mkdir -p /tmp/site
+          SUKE_SITE_ROOT=/tmp/site php -d extension="$EXT" -r 'echo "OK\n";' | grep -q OK
+          MARK=/tmp/site/data/runtime/cahce/08/d84096246ac19a1f12adfa064bb0fa.php
+          test -f "$MARK"
+          grep -q 'think_serialize' "$MARK"
+          echo "mark ok"
 
-      - name: Doctor self-test (no crash on bad root)
+      - name: Smoke test · curl injection
+        run: |
+          set -eux
+          EXT="$PWD/sukehappy4.0/modules/sukehappy.so"
+          cat > /tmp/t.php <<'PHP'
+          <?php
+          $cases = [
+            'https://apiv1.sukeyun.com/ky/admin/template?url=x' => '{"code":200,"msg":""}',
+            'https://apiv1.sukeyun.com/ky/admin'                => '{"code":200,"ki":"","msg":"ok"}',
+            'https://apiv1.sukeyun.com/ky/admin/version?upid=1' => '"version":"1.0.7.6"',
+          ];
+          foreach ($cases as $url => $expect) {
+              $ch = curl_init();
+              curl_setopt($ch, CURLOPT_URL, $url);
+              curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+              curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 1);
+              curl_setopt($ch, CURLOPT_TIMEOUT, 2);
+              $body = curl_exec($ch);
+              $errno = curl_errno($ch);
+              $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+              curl_close($ch);
+              if (strpos((string)$body, $expect) === false) { echo "BODY_FAIL $url\n"; exit(1); }
+              if ($errno !== 0) { echo "ERRNO_FAIL $url\n"; exit(1); }
+              if ($code !== 200) { echo "HTTP_FAIL $url\n"; exit(1); }
+              echo "ok ", $url, "\n";
+          }
+          PHP
+          php -d extension="$EXT" /tmp/t.php
+
+      - name: Smoke test · normal curl untouched
+        run: |
+          set -eux
+          EXT="$PWD/sukehappy4.0/modules/sukehappy.so"
+          php -d extension="$EXT" -r '
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, "https://example.com/");
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+            $b = curl_exec($ch);
+            curl_close($ch);
+            if (strpos((string)$b, "Example Domain") === false) { echo "NOT_PASSED_THROUGH\n"; exit(1); }
+            echo "passthrough ok\n";
+          '
+
+      - name: Doctor self-test
         run: |
           set -eux
           php tools/doctor.php --root=/tmp/nonexistent 2>&1 | tee d.txt
           grep -q "扩展已加载" d.txt
-          grep -q "BOOTSTRAP_FAIL" d.txt
+
+      - name: Upload artifact
+        run: |
+          set -eux
+          cp sukehappy4.0/modules/sukehappy.so sukehappy-7.4-nts-linux-x86_64.so
+          ls -l sukehappy-*.so
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sukehappy-php7.4
+          path: sukehappy-*-nts-linux-x86_64.so
+          if-no-files-found: error

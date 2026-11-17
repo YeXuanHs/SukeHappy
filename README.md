@@ -1,113 +1,139 @@
-# SukeHappy · 速科模板综合扩展
+# SukeHappy · 速科模板授权本地化扩展
 
-在运行时**拦截速科模板里已知的后门入口**，并**解锁授权限制**
-适用于无法修改源码的场景（源码经 Swoole Compiler 加密分发）。直装、零配置、不碰任何正常业务功能。
+针对**源码被 Swoole Compiler 加密**、无法直接改代码的速科（zjmf）模板，
+在 PHP 扩展层把授权校验的链路改写掉，同时封掉模板内置的后门入口。
 
-## 它做了什么
+> 版本 **4.0.0** 起只支持 PHP **7.4+**（源码里 `PHP_VERSION_ID < 70400` 直接编译报错）。
+> v3 源码留在 `archive/`，可以参考但不要用于生产。
 
-| 层次 | 作用 | 默认 | 影响正常功能吗 |
+## 它做什么
+
+| # | 作用 | 实现层 | 影响正常业务吗 |
 |---|---|---|---|
-| URL | 请求 URI 含 `i5nyyoblvmcpuj71` / `o5tlkifzcrrgcvhx` | **开** | 否（这两个路径正常业务零引用） |
-| 函数 | 执行到 `greatMove` / `e2iz72t17dzwmbnv` / `admin_decrypt` | **开** | 否（前两个是后门路由专用；`admin_decrypt` 全包只有后门调用） |
-| SQL | PDO 语句含 `DROP TABLE` / `TRUNCATE` / `ALTER TABLE` / `INTO OUTFILE` / `LOAD_FILE(` 等 | **关** | **会**（后台「卸载模板」「导入主题」要执行 DDL），需要时再开 |
-| 授权绕过 | 编译期重写 `common.php`，自动生成合法 `ki` 载荷并写入缓存，短路官方授权请求 | **开** | 否（完美伪装为正版，且支持在线更新） |
+| 1 | 写模板授权标记 | RINIT 落地缓存文件 | 否 |
+| 2 | 拦截后门 URI | RINIT 直接 404 | 否（这两个路径正常业务零引用） |
+| 3 | 伪造授权中心应答 | hook `curl_*` 内部函数 | 否（只对 `apiv1.sukeyun.com` 生效） |
 
-**默认只有前两层生效，对正常功能零影响。** 第 3 层是可选加固，默认关闭。
+**v4 不再需要本地 HTTP mock 服务**（v3 靠 `/etc/hosts` + 自签证书 + Python HTTPS 服务）。
 
-三项都可通过 php.ini 覆盖，不写死：
+## 原理
 
-```ini
-sukehappy.block_uris      = "i5nyyoblvmcpuj71,o5tlkifzcrrgcvhx"
-sukehappy.block_functions = "greatMove,e2iz72t17dzwmbnv,admin_decrypt"
-sukehappy.block_sql       = 0          ; SQL 兜底层，默认关；开=1 会拦 DDL，影响卸载/导入
-sukehappy.logfile         = "/var/log/sukehappy.log"
+### 1. 授权标记
+
+`TemplateBaseController::__construct()` 每个请求都检查：
+
+```php
+Cache("8ue6hpsuffpheaaj")   // 空 → header(百度) + include common.php + exit
 ```
 
-## 🔐 授权绕过原理（How it works）
+表现为**HTTP 200 但 body 0 字节**。扩展在 RINIT 保证这个缓存文件存在：
 
-速科模板在 `app/template/common.php` 中通过 `getAuthorizationCurl()` 向官方服务器请求授权。
-本扩展使用 `zend_compile_file` 钩子，在文件被编译前注入以下逻辑：
+```
+<站点根>/data/runtime/cahce/08/d84096246ac19a1f12adfa064bb0fa.php
+```
 
-1. **自动生成合法载荷**：获取当前域名，使用源码自带的 `AES-256-CBC` 密钥 (`50ftv31walzbaga5`) 和 IV (`0995964364864570`)，本地加密一个 2099 年过期的 JSON。
-2. **自动写入缓存**：将加密后的 `ki` 写入 `hzdtqmwbodere7d9` 缓存，并将 `8ue6hpsuffpheaaj` 标记为 `web`。
-3. **短路官方请求**：直接 `return ['code' => 200, 'ki' => $suke_ki]`，彻底阻断联网校验，秒过授权。
+`08` = `md5("8ue6hpsuffpheaaj")` 前两位；`cahce` 是模板自己的拼写错误，不要“修正”。
+文件内容是 ThinkPHP File 缓存格式：
 
-**完美兼容在线更新**：仅拦截授权请求 `getAuthorizationCurl`，未触碰 `getNewVersion` 和 `updateSuccess`，因此后端的更新检测依然会正常请求官方服务器。
+```
+<?php
+//000000000000
+exit();?>.think_serialize:a:1:{s:1:"k";s:3:"web";}
+```
+
+### 2. 后门 URI
+
+```
+i5nyyoblvmcpuj71   → template/Tools/e2iz72t17dzwmbnv
+o5tlkifzcrrgcvhx   → template/Tools/greatMove
+```
+
+命中直接 `404 + zend_bailout()`。
+
+### 3. 伪造授权应答
+
+模板通过 `Curlrequest()` 请求 `https://apiv1.sukeyun.com/ky/admin*`。扩展换掉
+三个内部函数的 handler：
+
+| hook | 做什么 |
+|---|---|
+| `curl_setopt` | **只读**记录 `CURLOPT_URL` 到「句柄 → URL」表 |
+| `curl_exec` | 先调原 handler，再按 URL 覆盖返回值 |
+| `curl_error` / `curl_errno` / `curl_getinfo` | 一并伪装成功 |
+
+应答按路径区分，**两个反直觉的点**：
+
+| 路径 | 应答 | 注意 |
+|---|---|---|
+| `/ky/admin/template` | `{"code":200,"msg":""}` | **msg 必须空串**，非空 = 授权失败 U-1 |
+| `/ky/admin` | `{"code":200,"ki":"","msg":"ok"}` | **ki 必须留空**，假 ki 会让中间件走进 php-jwt 异常路径 |
+| `/ky/admin/verification` | `{"code":200,"msg":"ok"}` | |
+| `/ky/admin/version` | `{...,"data":{"version":"1.0.7.6"}}` | |
+| `/ky/admin/callback` | `{"code":200,"msg":"ok"}` | |
+
+`/etc/hosts` 保留 `127.0.0.1 apiv1.sukeyun.com`，但 **443 不监听** —— 真实请求会
+立刻 `ECONNREFUSED`（毫秒级），没有 TLS 握手也没有外网流量，返回值由扩展覆盖。
+
+## 构建
+
+```bash
+cd sukehappy4.0
+phpize
+./configure --with-php-config=/www/server/php/74/bin/php-config
+make -j$(nproc)
+ls -l modules/sukehappy.so
+```
 
 ## 安装
 
-从 [Releases](../../releases) 里下载对应 PHP 版本的 `.so`（现提供 **7.1 / 7.2 / 7.3 / 7.4**，NTS），然后：
-
 ```ini
-extension=/path/to/SukeHappy-7.4-nts-linux-x86_64.so
-sukehappy.logfile=/var/log/sukehappy.log
+; php.ini
+extension=/path/to/sukehappy.so
 ```
 
-重载 php-fpm 后确认：
-
-```bash
-php -m | grep SukeHappy
-```
-
-## 体检脚本
-
-`tools/doctor.php` —— 引导站点应用，**直接调用模板自己的函数**，回报两件事：
-现在是不是已授权、在线更新能不能用。
-
-```bash
-php tools/doctor.php --root=/www/wwwroot/你的站点 --host=你的域名 --url=https://你的域名
-```
-
-它会调 `templateAuthorization()` / `getNewVersion()`，而不是自己重新拼一遍请求：
-
-| 检查项 | 怎么判断 |
-|---|---|
-| 授权状态 | 调 `templateAuthorization()`；未授权时该函数会 `exit("授权错误，错误码U-x")`，脚本捕获后判为未授权 |
-| 授权刷新 | 调 `getAuthorizationCurl()`，看能否拿到 `ki`（这是后台读的那个授权载荷） |
-| 授权缓存 | 读 `Cache::get('hzdtqmwbodere7d9')`、`Cache::get('8ue6hpsuffpheaaj')`，即 app 自己认的授权状态 |
-| 在线更新 | 调 `getNewVersion()`，返回版本信息=可用，返回 `error`=不可用 |
-| 后门入口 | 给了 `--url` 才查，HTTP 403/404/444 视为已封 |
-
-输出示例：
+站点根可通过环境变量覆盖（默认写死在源码里）：
 
 ```
-  [ OK ] 扩展已加载        sukehappy
-  [ OK ] 授权状态           已授权（templateAuthorization 正常返回）
-  [ OK ] 授权缓存 ki        有（348 字节，5f2a9c...）
-  [ OK ] 授权标记 web       "web" 已写入
-  [ OK ] 在线更新           可用，最新版本 1.0.7.8
-  [ OK ] 后门入口 /i5nyyoblvmcpuj71   HTTP 404
+SUKE_SITE_ROOT=/www/wwwroot/your-site
 ```
 
-子进程会继承当前的 `php.ini`（`-c` 一起带过去），所以像 swoole_loader 这种靠 `-c` 指定的扩展也能正常加载。
+改完 `.so` 必须重启 FPM：`systemctl restart php-fpm-74`。
 
-跑之前注意：用**站点自己的 PHP**（`php -v` 确认版本），别用系统里另一个 PHP，否则 loader 与扩展 ABI 都可能不对。
+## 目录结构
 
-拿不到结论时加 `SUKEHAPPY_DEBUG=1` 看子进程原始输出。
-
-## 本地编译
-
-```bash
-phpize
-./configure --with-php-config=$(which php-config)
-make
-sudo make install
+```
+sukehappy4.0/       扩展源码（config.m4 / php_sukehappy.h / sukehappy.c）
+tools/doctor.php    站点体检：引导模板应用后直接调 templateAuthorization()
+files/              线上实际部署的替换文件（前端 js + 后台），含路径映射说明
+archive/            v2/v3 与本方案废弃路线的源码留档
 ```
 
-各版本一致：`php` / `php-config` 指向哪个版本，就编出哪个版本的 `.so`。
+`files/` 的结构是 `files/public/...`，对应站点 `<站点根>/public/...`，
+其中 `admin_path` 是**占位符**（实际后台目录名看 `public/install.lock` 的 `Admin path:`）。
+详见 `files/README.md`。
 
-## 说明
+## 已经验证不可行的路线（别再试）
 
-- 只做**拦截**，不修改任何业务逻辑；命中即 404 + `zend_bailout()`，不输出任何内容。
-- 拦的是「函数名」，不是「类方法」，所以同名函数会被一起拦下——本仓库面向的后门函数名足够独特。
-- **第 3 层默认关闭**，因为后台的「卸载模板」「导入主题」本身要执行 DDL，开了会误伤。
-  需要更强加固时再显式 `sukehappy.block_sql=1`，用完记得关回去。
-- 第 3 层即使开了也只拦**毁灭性/外带**语句，**不拦 INSERT/UPDATE/DELETE**（会打挂业务），
-  所以它挡不住"静默篡改数据"，只挡"灭库/写文件/提权"。
-- 这是**缓解手段**，不是根治。根治要打官方补丁或替换掉含后门的加密文件。
-- 仅限用于你自己拥有/运维的站点。
+1. **hook `zend_execute_ex`** —— PHP 7.4 + ionCube + swoole_loader 下 worker 持续
+   SIGSEGV（RSHUTDOWN 还原也没用，loader 也在同一个指针上叠加）。
+2. **改 `zend_compile_file` / `zend_compile_string`** —— loader 保护的代码不走这两个钩子，
+   内存里只有「明文自检头 + 密文主体」，没有完整明文。
+3. **把模板函数换成内部函数 stub** —— Swoole 调用点用的是针对用户函数的特化 handler，替换即段错误。
+4. **直接改 op_array 第一条指令为 `ZEND_RETURN true`** —— 独立 php-cgi 可跑通，
+   FPM 下必崩，已弃用（`archive/sukehappy.c.oparray.bak`）。
+5. **跳过 `curl_exec` 原 handler** —— 句柄半初始化，析构时 libcurl 崩。
+6. **改 curl 参数槽里的 URL 字符串** —— 要动引用计数，算错就是 use-after-free。
+7. **在扩展里用 `ob_start` 改输出** —— 回调里 `RETURN_STR` 不增引用计数 → UAF / 输出变空。
 
+## 踩过的环境坑
 
-## License
+- CLI 用 `php-cli.ini`，**不读 `php.ini`** —— 测扩展要 `php -d extension=/path/xxx.so`
+- `IS_FUNCTION` 在 7.4 不是公开常量，查函数表用 `zend_hash_str_find_ptr`（表里存的是指针）
+- `-d extension=` 与 `php.ini` 里同名会被**静默忽略**（一直在跑旧的 `.so`）
+- php.ini 末尾无换行符时，追加配置会黏在上一行
 
-MIT
+## 授权绕过只是服务端一半
+
+前端还有一层：模板把「遮罩 `#bodyky` + 弹窗 `#myModal` + N 秒后关闭 + 跳转」
+整条链放在**动态加载的 `search.js`** 里（jsjiami.com.v7 混淆）。只做扩展不够，
+还要改 `themes` 下的 js —— 见 `files/`。
