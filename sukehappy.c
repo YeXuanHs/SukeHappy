@@ -22,6 +22,7 @@
 #include "ext/standard/info.h"
 #include "zend_compile.h"
 #include "zend_execute.h"
+#include "zend_vm.h"
 
 static FILE *g_log = NULL;
 static void plog(const char *fmt, ...) {
