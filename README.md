@@ -8,45 +8,68 @@
 | 层次 | 作用 | 默认 | 影响正常功能吗 |
 |---|---|---|---|
 | URL | 请求 URI 含 `i5nyyoblvmcpuj71` / `o5tlkifzcrrgcvhx` | **开** | 否（这两个路径正常业务零引用） |
-| 函数 | 执行到 `greatMove` / `e2iz72t17dzwmbnv` / `admin_decrypt` | **开** | 否（前两个是后门路由专用；`admin_decrypt` 全包只有后门调用） |
-| SQL | PDO 语句含 `DROP TABLE` / `TRUNCATE` / `ALTER TABLE` / `INTO OUTFILE` / `LOAD_FILE(` 等 | **关** | **会**（后台「卸载模板」「导入主题」要执行 DDL），需要时再开 |
-| 授权绕过 | 编译期重写 `common.php`，自动生成合法 `ki` 载荷并写入缓存，短路官方授权请求 | **开** | 否（完美伪装为正版，且支持在线更新） |
+| 授权标记 | RINIT 保证 `Cache("8ue6hpsuffpheaaj")` 的缓存文件存在 | **开** | 否 |
+| curl 应答 | 请求 `https://apiv1.sukeyun.com/ky/admin*` 时替换返回值 | **开** | 否（只对这一个域名生效） |
 
-**默认只有前两层生效，对正常功能零影响。** 第 3 层是可选加固，默认关闭。
+三层默认全开，均不碰正常业务。
 
-三项都可通过 php.ini 覆盖，不写死：
+站点根默认写死在源码里，可用环境变量覆盖（多站点/换目录时用）：
 
-```ini
-sukehappy.block_uris      = "i5nyyoblvmcpuj71,o5tlkifzcrrgcvhx"
-sukehappy.block_functions = "greatMove,e2iz72t17dzwmbnv,admin_decrypt"
-sukehappy.block_sql       = 0          ; SQL 兜底层，默认关；开=1 会拦 DDL，影响卸载/导入
-sukehappy.logfile         = "/var/log/sukehappy.log"
+```
+SUKE_SITE_ROOT=/www/wwwroot/你的站点
 ```
 
 ## 🔐 授权绕过原理（How it works）
 
-速科模板在 `app/template/common.php` 中通过 `getAuthorizationCurl()` 向官方服务器请求授权。
-本扩展使用 `zend_compile_file` 钩子，在文件被编译前注入以下逻辑：
+速科模板在 `app/template/common.php` 里用 `getAuthorizationCurl()` 取 `ki`、用 `templateAuthorization()`
+校验模板授权。本扩展**不改任何加密文件**，只在运行时做两件事：
 
-1. **自动生成合法载荷**：获取当前域名，使用源码自带的 `AES-256-CBC` 密钥 (`50ftv31walzbaga5`) 和 IV (`0995964364864570`)，本地加密一个 2099 年过期的 JSON。
-2. **自动写入缓存**：将加密后的 `ki` 写入 `hzdtqmwbodere7d9` 缓存，并将 `8ue6hpsuffpheaaj` 标记为 `web`。
-3. **短路官方请求**：直接 `return ['code' => 200, 'ki' => $suke_ki]`，彻底阻断联网校验，秒过授权。
+1. **写授权标记**：`TemplateBaseController::__construct()` 每个请求都读 `Cache("8ue6hpsuffpheaaj")`，
+   为空就 `header(百度)` + `include common.php` + `exit` —— 表现为 **HTTP 200 但 body 0 字节**。
+   扩展在 RINIT 直接把这个缓存文件落盘：
 
-**完美兼容在线更新**：仅拦截授权请求 `getAuthorizationCurl`，未触碰 `getNewVersion` 和 `updateSuccess`，因此后端的更新检测依然会正常请求官方服务器。
+   ```
+   <站点根>/data/runtime/cahce/08/d84096246ac19a1f12adfa064bb0fa.php
+   ```
+
+   `08` = `md5("8ue6hpsuffpheaaj")` 前两位；`cahce` 是模板自己的拼写错误，不要"修正"。
+   内容是 ThinkPHP File 缓存格式（`<?php … exit();?>` + `.think_serialize:…`）。
+
+2. **替换授权应答**：换掉 `curl_setopt` / `curl_exec` 的内部函数 handler ——
+   前者只读记下每个句柄的 URL，后者先调原 handler、再按 URL 覆盖返回值。
+   `curl_error` / `curl_errno` / `curl_getinfo` 一并伪装成功，否则模板会走 `CURL ERROR:` 分支。
+
+应答按路径区分，**两个反直觉的点**：
+
+| 路径 | 应答 | 注意 |
+|---|---|---|
+| `/ky/admin/template` | `{"code":200,"msg":""}` | **`msg` 必须空串**，非空 = 授权失败 U-1 |
+| `/ky/admin` | `{"code":200,"ki":"","msg":"ok"}` | **`ki` 必须留空**，假 ki 会让中间件走进 php-jwt 异常路径 |
+| `/ky/admin/verification` | `{"code":200,"msg":"ok"}` | |
+| `/ky/admin/version` | `{…,"data":{"version":"1.0.7.6"}}` | |
+| `/ky/admin/callback` | `{"code":200,"msg":"ok"}` | |
+
+`/etc/hosts` 里保留 `127.0.0.1 apiv1.sukeyun.com`，但 **443 不监听** —— 真实请求会立刻
+`ECONNREFUSED`（毫秒级），没有 TLS 握手也没有外网流量，返回值由扩展覆盖。
+v3 曾用「自签证书 + 本地 HTTPS mock 服务」，v4 已不需要。
+
+**关于在线更新**：v4 只伪造 `/ky/admin*` 这几个授权接口。后台「检测更新」走的是
+`/v1/VersionInformation/*`，仍是官方地址，而 hosts 把它指到了本机，所以检测会失败。
+要用官方在线更新，得去掉 hosts 那条并具备站点授权。
 
 ## 安装
 
-从 [Releases](../../releases) 里下载对应 PHP 版本的 `.so`（现提供 **7.1 / 7.2 / 7.3 / 7.4**，NTS），然后：
+从 [Releases](../../releases) 里下载 `.so`（v4 只提供 **7.4** NTS；源码里 `PHP_VERSION_ID < 70400`
+会直接编译报错），然后：
 
 ```ini
-extension=/path/to/SukeHappy-7.4-nts-linux-x86_64.so
-sukehappy.logfile=/var/log/sukehappy.log
+extension=/path/to/sukehappy-7.4-nts-linux-x86_64.so
 ```
 
 重载 php-fpm 后确认：
 
 ```bash
-php -m | grep SukeHappy
+php -m | grep sukehappy
 ```
 
 ## 体检脚本
@@ -63,7 +86,7 @@ php tools/doctor.php --root=/www/wwwroot/你的站点 --host=你的域名 --url=
 | 检查项 | 怎么判断 |
 |---|---|
 | 授权状态 | 调 `templateAuthorization()`；未授权时该函数会 `exit("授权错误，错误码U-x")`，脚本捕获后判为未授权 |
-| 授权刷新 | 调 `getAuthorizationCurl()`，看能否拿到 `ki`（这是后台读的那个授权载荷） |
+| 授权刷新 | 调 `getAuthorizationCurl()`，看能否正常返回（v4 下 `ki` 为空串，这是有意的） |
 | 授权缓存 | 读 `Cache::get('hzdtqmwbodere7d9')`、`Cache::get('8ue6hpsuffpheaaj')`，即 app 自己认的授权状态 |
 | 在线更新 | 调 `getNewVersion()`，返回版本信息=可用，返回 `error`=不可用 |
 | 后门入口 | 给了 `--url` 才查，HTTP 403/404/444 视为已封 |
@@ -73,9 +96,9 @@ php tools/doctor.php --root=/www/wwwroot/你的站点 --host=你的域名 --url=
 ```
   [ OK ] 扩展已加载        sukehappy
   [ OK ] 授权状态           已授权（templateAuthorization 正常返回）
-  [ OK ] 授权缓存 ki        有（348 字节，5f2a9c...）
+  [ -- ] 授权缓存 ki        无（v4 不生成 ki，模板也不需要）
   [ OK ] 授权标记 web       "web" 已写入
-  [ OK ] 在线更新           可用，最新版本 1.0.7.8
+  [ -- ] 在线更新           不可用（/v1 被 hosts 指到本机）
   [ OK ] 后门入口 /i5nyyoblvmcpuj71   HTTP 404
 ```
 
@@ -98,12 +121,10 @@ sudo make install
 
 ## 说明
 
-- 只做**拦截**，不修改任何业务逻辑；命中即 404 + `zend_bailout()`，不输出任何内容。
-- 拦的是「函数名」，不是「类方法」，所以同名函数会被一起拦下——本仓库面向的后门函数名足够独特。
-- **第 3 层默认关闭**，因为后台的「卸载模板」「导入主题」本身要执行 DDL，开了会误伤。
-  需要更强加固时再显式 `sukehappy.block_sql=1`，用完记得关回去。
-- 第 3 层即使开了也只拦**毁灭性/外带**语句，**不拦 INSERT/UPDATE/DELETE**（会打挂业务），
-  所以它挡不住"静默篡改数据"，只挡"灭库/写文件/提权"。
+- 后门拦截只做**阻断**，命中即 404 + `zend_bailout()`，不输出任何内容。
+- 拦的是「函数名」，不是「类方法」——v4 已不再拦函数，仅按 URI 拦这两条后门路由。
+- curl 应答替换只对 `apiv1.sukeyun.com` 的 `/ky/admin*` 生效，其余域名原样透传。
+- 不修改任何加密文件，也不改业务逻辑；授权标记与应答替换全部在运行时完成。
 - 这是**缓解手段**，不是根治。根治要打官方补丁或替换掉含后门的加密文件。
 - 仅限用于你自己拥有/运维的站点。
 
