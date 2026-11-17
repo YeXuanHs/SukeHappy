@@ -22,7 +22,6 @@ jobs:
           coverage: none
 
       - name: Compile
-        working-directory: sukehappy4.0
         run: |
           set -eux
           phpize
@@ -33,7 +32,7 @@ jobs:
       - name: Smoke test · auth mark
         run: |
           set -eux
-          EXT="$PWD/sukehappy4.0/modules/sukehappy.so"
+          EXT="$PWD/modules/sukehappy.so"
           rm -rf /tmp/site && mkdir -p /tmp/site
           SUKE_SITE_ROOT=/tmp/site php -d extension="$EXT" -r 'echo "OK\n";' | grep -q OK
           MARK=/tmp/site/data/runtime/cahce/08/d84096246ac19a1f12adfa064bb0fa.php
@@ -44,7 +43,7 @@ jobs:
       - name: Smoke test · curl injection
         run: |
           set -eux
-          EXT="$PWD/sukehappy4.0/modules/sukehappy.so"
+          EXT="$PWD/modules/sukehappy.so"
           cat > /tmp/t.php <<'PHP'
           <?php
           $cases = [
@@ -73,7 +72,7 @@ jobs:
       - name: Smoke test · normal curl untouched
         run: |
           set -eux
-          EXT="$PWD/sukehappy4.0/modules/sukehappy.so"
+          EXT="$PWD/modules/sukehappy.so"
           php -d extension="$EXT" -r '
             $ch = curl_init();
             curl_setopt($ch, CURLOPT_URL, "https://example.com/");
@@ -94,7 +93,7 @@ jobs:
       - name: Upload artifact
         run: |
           set -eux
-          cp sukehappy4.0/modules/sukehappy.so sukehappy-7.4-nts-linux-x86_64.so
+          cp modules/sukehappy.so sukehappy-7.4-nts-linux-x86_64.so
           ls -l sukehappy-*.so
 
       - uses: actions/upload-artifact@v4
