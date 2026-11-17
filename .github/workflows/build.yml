@@ -9,9 +9,101 @@ on:
 
 jobs:
   build:
-    name: php-7.4
+    name: php-${{ matrix.php }}
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.2', '7.3', '7.4']
 
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile
+        run: |
+          set -eux
+          docker run --rm -v "$PWD":/src -w /src php:${{ matrix.php }}-cli sh -c '
+            set -e
+            if ! command -v autoconf >/dev/null 2>&1; then
+              apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+                autoconf gcc make libc-dev pkg-config >/dev/null
+            fi
+            php -v
+            phpize
+            ./configure --with-php-config="$(which php-config)"
+            make -j"$(nproc)"
+            ls -l modules/sukehappy.so
+          '
+
+      - name: Smoke test
+        run: |
+          set -eux
+          docker run --rm -v "$PWD":/src -w /src php:${{ matrix.php }}-cli sh -c '
+            set -e
+            EXT=/src/modules/sukehappy.so
+
+            # 1) 授权标记必须被自动落盘
+            rm -rf /tmp/site && mkdir -p /tmp/site
+            SUKE_SITE_ROOT=/tmp/site php -d extension="$EXT" -r "echo \"OK\n\";"
+            MARK=/tmp/site/data/runtime/cahce/08/d84096246ac19a1f12adfa064bb0fa.php
+            test -f "$MARK"
+            grep -q think_serialize "$MARK"
+            echo "mark ok"
+
+            # 2) 授权应答必须被替换
+            cat > /tmp/t.php <<PHPEOF
+            <?php
+            \$cases = [
+              "https://apiv1.sukeyun.com/ky/admin/template?url=x" => "{\"code\":200,\"msg\":\"\"}",
+              "https://apiv1.sukeyun.com/ky/admin"                => "{\"code\":200,\"ki\":\"\",\"msg\":\"ok\"}",
+              "https://apiv1.sukeyun.com/ky/admin/version?upid=1" => "\"version\":\"1.0.7.6\"",
+            ];
+            foreach (\$cases as \$url => \$expect) {
+                \$ch = curl_init();
+                curl_setopt(\$ch, CURLOPT_URL, \$url);
+                curl_setopt(\$ch, CURLOPT_RETURNTRANSFER, 1);
+                curl_setopt(\$ch, CURLOPT_CONNECTTIMEOUT, 2);
+                curl_setopt(\$ch, CURLOPT_TIMEOUT, 5);
+                \$body = curl_exec(\$ch);
+                \$errno = curl_errno(\$ch);
+                \$code = curl_getinfo(\$ch, CURLINFO_HTTP_CODE);
+                curl_close(\$ch);
+                if (strpos((string)\$body, \$expect) === false) { echo "BODY_FAIL \$url\n"; exit(1); }
+                if (\$errno !== 0) { echo "ERRNO_FAIL \$url\n"; exit(1); }
+                if (\$code !== 200) { echo "HTTP_FAIL \$url\n"; exit(1); }
+            }
+            echo "inject ok\n";
+            PHPEOF
+            php -d extension="$EXT" /tmp/t.php
+
+            # 3) 普通域名必须原样透传
+            php -d extension="$EXT" -r "
+              \$ch = curl_init();
+              curl_setopt(\$ch, CURLOPT_URL, \"https://example.com/\");
+              curl_setopt(\$ch, CURLOPT_RETURNTRANSFER, 1);
+              curl_setopt(\$ch, CURLOPT_TIMEOUT, 10);
+              \$b = curl_exec(\$ch);
+              curl_close(\$ch);
+              if (strpos((string)\$b, \"Example Domain\") === false) { echo \"NOT_PASSED_THROUGH\n\"; exit(1); }
+              echo \"passthrough ok\n\";
+            "
+          '
+
+      - name: Rename artifact
+        run: |
+          set -eux
+          cp modules/sukehappy.so "sukehappy-${{ matrix.php }}-nts-linux-x86_64.so"
+          ls -l sukehappy-*.so
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sukehappy-php${{ matrix.php }}
+          path: sukehappy-*-nts-linux-x86_64.so
+          if-no-files-found: error
+
+  doctor:
+    name: doctor
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -21,83 +113,15 @@ jobs:
           extensions: curl
           coverage: none
 
-      - name: Compile
+      - name: Build
         run: |
           set -eux
           phpize
           ./configure --with-php-config="$(which php-config)"
           make -j"$(nproc)"
-          ls -l modules/sukehappy.so
-
-      - name: Smoke test · auth mark
-        run: |
-          set -eux
-          EXT="$PWD/modules/sukehappy.so"
-          rm -rf /tmp/site && mkdir -p /tmp/site
-          SUKE_SITE_ROOT=/tmp/site php -d extension="$EXT" -r 'echo "OK\n";' | grep -q OK
-          MARK=/tmp/site/data/runtime/cahce/08/d84096246ac19a1f12adfa064bb0fa.php
-          test -f "$MARK"
-          grep -q 'think_serialize' "$MARK"
-          echo "mark ok"
-
-      - name: Smoke test · curl injection
-        run: |
-          set -eux
-          EXT="$PWD/modules/sukehappy.so"
-          cat > /tmp/t.php <<'PHP'
-          <?php
-          $cases = [
-            'https://apiv1.sukeyun.com/ky/admin/template?url=x' => '{"code":200,"msg":""}',
-            'https://apiv1.sukeyun.com/ky/admin'                => '{"code":200,"ki":"","msg":"ok"}',
-            'https://apiv1.sukeyun.com/ky/admin/version?upid=1' => '"version":"1.0.7.6"',
-          ];
-          foreach ($cases as $url => $expect) {
-              $ch = curl_init();
-              curl_setopt($ch, CURLOPT_URL, $url);
-              curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-              curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 1);
-              curl_setopt($ch, CURLOPT_TIMEOUT, 2);
-              $body = curl_exec($ch);
-              $errno = curl_errno($ch);
-              $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-              curl_close($ch);
-              if (strpos((string)$body, $expect) === false) { echo "BODY_FAIL $url\n"; exit(1); }
-              if ($errno !== 0) { echo "ERRNO_FAIL $url\n"; exit(1); }
-              if ($code !== 200) { echo "HTTP_FAIL $url\n"; exit(1); }
-              echo "ok ", $url, "\n";
-          }
-          PHP
-          php -d extension="$EXT" /tmp/t.php
-
-      - name: Smoke test · normal curl untouched
-        run: |
-          set -eux
-          EXT="$PWD/modules/sukehappy.so"
-          php -d extension="$EXT" -r '
-            $ch = curl_init();
-            curl_setopt($ch, CURLOPT_URL, "https://example.com/");
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-            $b = curl_exec($ch);
-            curl_close($ch);
-            if (strpos((string)$b, "Example Domain") === false) { echo "NOT_PASSED_THROUGH\n"; exit(1); }
-            echo "passthrough ok\n";
-          '
 
       - name: Doctor self-test
         run: |
           set -eux
           php tools/doctor.php --root=/tmp/nonexistent 2>&1 | tee d.txt
           grep -q "扩展已加载" d.txt
-
-      - name: Upload artifact
-        run: |
-          set -eux
-          cp modules/sukehappy.so sukehappy-7.4-nts-linux-x86_64.so
-          ls -l sukehappy-*.so
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sukehappy-php7.4
-          path: sukehappy-*-nts-linux-x86_64.so
-          if-no-files-found: error

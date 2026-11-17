@@ -48,8 +48,8 @@
 # error "PHP_VERSION_ID not defined"
 #endif
 
-#if PHP_VERSION_ID < 70400
-# error "sukehappy 只支持 PHP >= 7.4"
+#if PHP_VERSION_ID < 70200
+# error "sukehappy 支持 PHP 7.2 ~ 7.4"
 #endif
 
 #define SUKE_LOG_PATH "/tmp/sukehappy.log"

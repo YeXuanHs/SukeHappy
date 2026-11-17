@@ -59,12 +59,14 @@ v3 曾用「自签证书 + 本地 HTTPS mock 服务」，v4 已不需要。
 
 ## 安装
 
-从 [Releases](../../releases) 里下载 `.so`（v4 只提供 **7.4** NTS；源码里 `PHP_VERSION_ID < 70400`
-会直接编译报错），然后：
+从 [Releases](../../releases) 里下载对应 PHP 版本的 `.so`（**7.2 / 7.3 / 7.4**，NTS），然后：
 
 ```ini
 extension=/path/to/sukehappy-7.4-nts-linux-x86_64.so
 ```
+
+三个版本都用源码实测过（PHP 7.2.34 / 7.3.34 / 7.4.33）：编译与运行时注入全通过。
+代码里只有一处版本门限 `PHP_VERSION_ID < 70200` 会报错，没有任何版本分支。
 
 重载 php-fpm 后确认：
 
