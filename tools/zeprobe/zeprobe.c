@@ -33,6 +33,19 @@ static void my_statement_handler(zend_execute_data *frame) {
  * （报 "requires Zend Engine API version -135446428"）。 */
 extern zend_extension zend_extension_entry;
 
+/* 函数调用时触发（每次调用前）。如果这里能看到 templateauthorization，
+ * 就说明执行阶段走的是标准 VM —— 那它就是可用的注入点。 */
+static void my_fcall_begin(zend_execute_data *frame) {
+    const char *fn;
+    FILE *f;
+    if (!frame || !frame->func || !frame->func->common.function_name) return;
+    fn = ZSTR_VAL(frame->func->common.function_name);
+    f = fopen("/tmp/ze.log", "a");
+    if (!f) return;
+    fprintf(f, "FCALL %s\n", fn);
+    fclose(f);
+}
+
 /* build_id_check 和 api_no_check 一样：传 NULL 会让 PHP 走默认实现，
  * 读到垃圾值后**静默丢弃扩展**（表现为脚本不执行、无任何输出）。 */
 static int my_build_id_check(const char *build_id) {
@@ -65,9 +78,18 @@ static int my_startup(zend_extension *ze) {
     return SUCCESS;
 }
 
-/* 老式版本信息（16 字节，和 ioncube 一样）。PHP 在没有
- * zend_extension_entry 时会回落到用它创建默认结构。加上无副作用。 */
-ZEND_DLEXPORT char *extension_version_info = "1.0";
+/* 关键：extension_version_info 是**结构体**不是字符串！
+ * 源码 Zend/zend_extensions.h:
+ *   typedef struct _zend_extension_version_info {
+ *       int zend_extension_api_no;
+ *       char *build_id;
+ *   } zend_extension_version_info;
+ * 写成 char* 会让 PHP 把字符串后的垃圾当 build_id →
+ * zend_load_extension_handle 里 strcmp(ZEND_EXTENSION_BUILD_ID, build_id) 直接段错误。 */
+ZEND_DLEXPORT zend_extension_version_info extension_version_info = {
+    ZEND_EXTENSION_API_NO,
+    ZEND_EXTENSION_BUILD_ID
+};
 
 ZEND_DLEXPORT zend_extension zend_extension_entry = {
     "ze_probe",                 /* name */
@@ -82,7 +104,7 @@ ZEND_DLEXPORT zend_extension zend_extension_entry = {
     NULL,                       /* message_handler */
     my_op_array_handler,        /* op_array_handler   <== 关键 */
     my_statement_handler,       /* statement_handler */
-    NULL,                       /* fcall_begin_handler */
+    my_fcall_begin,             /* fcall_begin_handler */
     NULL,                       /* fcall_end_handler */
     NULL,                       /* op_array_ctor */
     NULL,                       /* op_array_dtor */
@@ -96,5 +118,5 @@ ZEND_DLEXPORT zend_extension zend_extension_entry = {
     (void *)"API320180731,NTS", (void *)"API320180731,NTS",
     (void *)"API320180731,NTS", (void *)"API320180731,NTS",
     0,                          /* handle */
-    0                           /* resource_number */
+    -1                          /* resource_number（官方宏里就是 -1） */
 };
