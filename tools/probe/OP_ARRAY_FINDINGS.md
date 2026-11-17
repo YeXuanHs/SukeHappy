@@ -174,3 +174,83 @@ add    (%rcx,%rsi,4),%edx     ; 再加 operand type 表（0x43ad0）的项
 
 另外，**用正确的 62 + 从别的函数借 RETURN handler** 重新跑一遍 op_array 改写
 也应该做 —— 之前的失败是在错参数下得到的，不算数。
+
+---
+
+# 🎉 最终结论（2026-11-17 08:40）：op_array 方案跑通了
+
+## 实测结果
+
+正式扩展 `sukehappy.so` 加载后：
+
+```
+$ php-cgi -c ini.ini t8.php
+loaded
+result => true            ← templateAuthorization() 返回 true
+```
+
+连跑 5 次全部 `result => true`。
+
+## 全部踩过的坑（一共 6 个，缺一个都不行）
+
+### 四个技术坑
+
+| # | 坑 | 症状 |
+|---|---|---|
+| 1 | 函数名长度硬编码成 20（实际 `templateauthorization` 是 **21**） | `zend_hash_str_find` 按长度匹配 → 永远查不到，误判成"拿不到 op_array" |
+| 2 | `60` 当成 ZEND_RETURN（实际 60=DO_FCALL，**62=RETURN**） | 抄错 handler → 畸形指令 → 返回 NULL / 整页乱码 |
+| 3 | `op1.constant` 当成 literal 索引 | 它是**相对 opline 的字节偏移**：`(char*)&literals[lit] - (char*)opline`；写成索引 → 读到垃圾 → 返回 NULL |
+| 4 | 从别的函数「借」handler | 特化 handler 与 op1_type 绑定；而且**遍历函数表**会打断 loader 解密 |
+
+**坑 4 的正解**：用 **`zend_vm_set_opcode_handler(&op)` 函数**自动算 handler。
+注意不是宏 —— `ZEND_VM_SET_OPCODE_HANDLER` 宏在 `zend_vm_execute.h` 里，
+那个文件太大不能 include；直接写宏名会变成 undefined symbol。
+
+### 两个模块结构坑
+
+| # | 坑 | 症状 |
+|---|---|---|
+| 5 | 用 `ZEND_MODULE_GLOBALS` + `PHP_GINIT` + `STANDARD_MODULE_PROPERTIES_EX` | PHP 7.4 上 globals 指针错乱，编译报 `sukehappy_globals is a pointer` |
+| 6 | 无条件 hook `zend_execute_internal` | loader 解密时会调用内部函数，被截住 → 解密失败 → `common.php` 报 Parse error |
+
+**正解**：全部用 `static` 变量、`MINIT` 保持为空、`STANDARD_MODULE_HEADER` +
+`STANDARD_MODULE_PROPERTIES`、只在需要时 hook `execute_internal`。
+
+### 一个环境坑（坑了我 50 多轮）
+
+**用来测试的 ini 文件根本没创建成功** → php-cgi 用默认配置 → 没加载 loader
+→ `common.php` 报 Parse error → 误判成"扩展破坏了 loader 解密"。
+
+**教训**：写测试 ini 后**必须 `cat` 出来确认**，别假设写成功了。
+
+## 最终可用的实现要点
+
+```c
+/* 1) 找函数：长度用 strlen */
+f = zend_hash_str_find_ptr(EG(function_table), "templateauthorization",
+                           strlen("templateauthorization"));   /* 21 */
+
+/* 2) 找 IS_TRUE literal */
+for (i = 0; i < oa->last_literal; i++)
+    if (Z_TYPE_P(&oa->literals[i]) == IS_TRUE) { lit = i; break; }
+
+/* 3) 改第 0 条指令 */
+oa->opcodes[0].opcode        = 62;              /* ZEND_RETURN */
+oa->opcodes[0].op1_type      = IS_CONST;
+oa->opcodes[0].op2_type      = IS_UNUSED;
+oa->opcodes[0].result_type   = IS_UNUSED;
+oa->opcodes[0].extended_value = 0;
+#if ZEND_USE_ABS_CONST_ADDR
+oa->opcodes[0].op1.zv        = &oa->literals[lit];
+#else
+oa->opcodes[0].op1.constant =
+    (uint32_t)((char *)&oa->literals[lit] - (char *)&oa->opcodes[0]);
+#endif
+
+/* 4) handler 用函数自动算（不要用宏、不要去借） */
+zend_vm_set_opcode_handler(&oa->opcodes[0]);
+
+/* 5) EG 和 CG 两份都改 */
+```
+
+**时机**：在 `execute_ex` 里，每次进用户函数都试一次；两个函数都改成功就置标志位。
