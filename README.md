@@ -9,6 +9,7 @@
 |---|---|---|---|
 | URL | 请求 URI 含 `i5nyyoblvmcpuj71` / `o5tlkifzcrrgcvhx` | **开** | 否（这两个路径正常业务零引用） |
 | 授权标记 | RINIT 保证 `Cache("8ue6hpsuffpheaaj")` 的缓存文件存在 | **开** | 否 |
+| 授权密钥 | RINIT 写入 `Cache("hzdtqmwbodere7d9")`（`/v33` 用它当 JWT 密钥） | **开** | 否 |
 | curl 应答 | 请求 `https://apiv1.sukeyun.com/ky/admin*` 时替换返回值 | **开** | 否（只对这一个域名生效） |
 
 三层默认全开，均不碰正常业务。
@@ -17,10 +18,13 @@
 并补上「重置密码」「首装创建管理员」等界面；以及前台三处 JS（授权闸门去掉）。
 这些是文件覆盖，不随扩展生效，装法见《安装 · 第二步》。
 
-站点根默认写死在源码里，可用环境变量覆盖（多站点/换目录时用）：
+站点根**自动探测**：RINIT 时从 `SG(request_info).path_translated` 反推
+（`/site/public/index.php → /site`，再用 `data/runtime` 是否存在校验），
+所以拷到任意路径都能直接用。多站点或有特殊情况时用环境变量强制指定：
 
-```
-SUKE_SITE_ROOT=/www/wwwroot/你的站点
+```ini
+; php.ini
+env[SUKE_SITE_ROOT] = /www/wwwroot/你的站点
 ```
 
 ## 🔐 授权绕过原理（How it works）
@@ -48,10 +52,47 @@ SUKE_SITE_ROOT=/www/wwwroot/你的站点
 | 路径 | 应答 | 注意 |
 |---|---|---|
 | `/ky/admin/template` | `{"code":200,"msg":""}` | **`msg` 必须空串**，非空 = 授权失败 U-1 |
-| `/ky/admin` | `{"code":200,"ki":"","msg":"ok"}` | **`ki` 必须留空**，假 ki 会让中间件走进 php-jwt 异常路径 |
+| `/ky/admin` | `{"code":200,"ki":"<固定密钥>","msg":"ok"}` | **`ki` 必须与 `api/jwt.php` 的 `SUKE_JWT_SECRET` 一致**（`/v33` 用它验 JWT） |
 | `/ky/admin/verification` | `{"code":200,"msg":"ok"}` | |
 | `/ky/admin/version` | `{…,"data":{"version":"1.0.7.6"}}` | |
 | `/ky/admin/callback` | `{"code":200,"msg":"ok"}` | |
+
+### 第二层：`/v33` 业务接口（后台页面有没有数据）
+
+后台所有列表、统计都走 `/v33/...`。这一层比授权标记更严，**授权标记正常、页面能开，数据照样可以是空的**。
+
+闸门在 `app/template/vendor/composer/AutoloadTask.php::handle()`，它作为中间件跑在控制器之前：
+
+| 条件 | 结果 |
+|---|---|
+| 缺 `X-User-Token` 请求头 | `terminate("非法请求，-0")` |
+| 有 token，但 `Cache("hzdtqmwbodere7d9")` 为空 | `terminate("请求失败，-2")` |
+| 缓存有值 + token 能用它验签 | 放行到控制器 |
+
+放行需要同时满足两件事：
+
+1. **授权密钥缓存存在** —— `Cache("hzdtqmwbodere7d9")` 的值就是 `/ky/admin` 返回的 `ki`，
+   模板拿它当 **HS256 的 HMAC 密钥**去验请求里的 JWT。
+2. **请求头是能用这个 `ki` 验过的 JWT** —— 前端 axios 拦截器会带两个头：
+   `X-Api-Token`（登录 token）、`X-User-Token`（`userInfo.user_token`），**网关解的是后者**。
+
+三个坑（都踩过）：
+
+- **`ki` 不能留空**。空 `ki` → 缓存写不进去 → 任何 token 都是 `-2`。
+  早期版本为了躲 php-jwt 异常把 `ki` 留空，代价就是 `/v33` 永远不通。
+- **缓存文件名是 `md5` 拆开的**：`cahce/<前两位>/<后30位>.php`。
+  `md5("hzdtqmwbodere7d9") = 311ccd705bdb0aa5ecc79f8d96274d43`，
+  正确路径是 `cahce/31/1ccd705bdb0aa5ecc79f8d96274d43.php` —— 写成 `31/311ccd…` 会 `exists=0`。
+- **数据必须从文件第 32 字节开始**：`<?php\n//` + 12 位过期时间 + `\n exit();?>\n`（`exit` 前有个空格）。
+  少一个空格，`substr($content,32)` 就会多带一个换行，密钥变成 `"\nk7Qm…"`，签名一样过不去。
+
+登录侧配套改动在 `files/public/admin_path/api/`：
+
+| 文件 | 作用 |
+|---|---|
+| `jwt.php` | HS256 签名/验签，`SUKE_JWT_SECRET` 必须等于 `.so` 里的 `SUKE_KI` |
+| `login.php` | 账号校验 + 首装建管理员 + 签发 JWT；`userInfo.user_token` 也返回 JWT |
+| `router.php` | 只做分发，`login` 分支 `require` 上面的 `login.php` |
 
 ## 安装
 
@@ -101,21 +142,27 @@ cp -rf /path/to/SukeHappy/files/public/themes/. public/themes/
 chown -R www:www public
 ```
 
-覆盖后的后台目录会多出/更新这 7 个文件：
+覆盖后的后台目录会多出/更新这些文件：
 
 | 文件 | 作用 |
 |---|---|
 | `index.html` | 引入 `css/sky.css`、去掉旧脚本引用、脚本版本号 |
 | `css/sky.css` | **新增**：登录页样式修正 + 重置密码弹窗样式 |
-| `api/router.php` | **新增**：本地账号接口（登录 / 改密 / 会话校验），读写 `shd_tpl_config` |
-| `js/app.0589beb3.js` | `ADMIN_URL` 指向本地 `router.php`；chunk 哈希映射 |
-| `js/layout.k8.js` | 下拉菜单「重置密码」+ 弹窗实现 |
-| `js/scuiChunks.k2.js` | 登录页精简 + 首装态（创建管理员账号） |
+| `api/router.php` | **新增**：本地账号接口（会话校验 / 改密），`login` 分支转给 `login.php` |
+| `api/login.php` | **新增**：登录 + 首装建管理员 + 签发 HS256 JWT |
+| `api/jwt.php` | **新增**：JWT 签名/验签，密钥与 `.so` 的 `ki` 一致 |
+| `api/menu.json` | **新增**：后台菜单树（68 个页面，前端启动时读取，不写 localStorage） |
+| `js/app.0589beb3.js` | `ADMIN_URL` 指向本地接口；chunk 映射；菜单改为读 `api/menu.json` |
+| `js/layout.ke.js` | 下拉菜单「重置密码」+ 弹窗实现（Chunk `7225`） |
+| `js/scuiChunks.k2.js` | 登录页精简 + 首装态；菜单不落 localStorage |
 | `js/login.69e3f7f1c.js` | 去掉「邮箱登录 / 验证码登录」两个 tab |
+
+> 后台里那三个按钮（机器人 / 公告 / 版本发布）连同它们的抽屉已经从 `layout.ke.js` 的 render 里删掉了，
+> 对应方法和 data 也一并清理，不是隐藏。
 
 几个坑：
 
-- **文件名里的哈希不要改**（`layout.k8.js`、`scuiChunks.k2.js`）。文件名由 `app.js` 里的映射表指定，哈希同时承担缓存失效；只替换内容不改名，老用户 12 小时内看不到更新。
+- **文件名里的哈希不要改**（`layout.ke.js`、`scuiChunks.k2.js`）。文件名由 `app.js` 里的映射表指定，哈希同时承担缓存失效；只替换内容不改名，老用户 12 小时内看不到更新。
 - 覆盖完让浏览器强刷一次（Ctrl+F5）。
 - 后台目录名取错会连到别的库，务必先 `cat public/install.lock` 确认。
 
@@ -134,7 +181,7 @@ php tools/doctor.php --root=/www/wwwroot/你的站点 --host=你的域名 --url=
 |---|---|
 | 授权状态 | 调 `templateAuthorization()`；未授权时该函数会 `exit("授权错误，错误码U-x")`，脚本捕获后判为未授权 |
 | 授权刷新 | 调 `getAuthorizationCurl()`，看能否正常返回（`ki` 为空串，这是有意的） |
-| 授权缓存 | 读 `Cache::get('hzdtqmwbodere7d9')`、`Cache::get('8ue6hpsuffpheaaj')`，即 app 自己认的授权状态 |
+| 授权缓存 | 读 `Cache::get('hzdtqmwbodere7d9')`（JWT 密钥）、`Cache::get('8ue6hpsuffpheaaj')`（授权标记） |
 | 在线更新 | 调 `getNewVersion()`，返回版本信息=可用，返回 `error`=不可用 |
 | 后门入口 | 给了 `--url` 才查，HTTP 403/404/444 视为已封 |
 
@@ -143,7 +190,7 @@ php tools/doctor.php --root=/www/wwwroot/你的站点 --host=你的域名 --url=
 ```
   [ OK ] 扩展已加载        sukehappy
   [ OK ] 授权状态           已授权（templateAuthorization 正常返回）
-  [ -- ] 授权缓存 ki        无（不生成 ki，模板也不需要）
+  [ OK ] 授权缓存 ki        有（32 字节，/v33 用它验 JWT）
   [ OK ] 授权标记 web       "web" 已写入
   [ -- ] 在线更新           不可用（未接官方授权）
   [ OK ] 后门入口 /i5nyyoblvmcpuj71   HTTP 404
@@ -175,6 +222,23 @@ sudo make install
 - 不改任何加密文件，也不改业务逻辑。
 - 仅限用于你自己拥有/运维的站点。
 
+
+## 更新日志
+
+### 1.2.0
+
+- **修通 `/v33`**：`.so` 现在会写入授权密钥缓存 `cahce/31/1ccd705bdb0aa5ecc79f8d96274d43.php`，
+  后台列表/统计不再是 `请求失败，-2`
+- `/ky/admin` 的 `ki` 从空串改为固定密钥，与 `api/jwt.php` 对齐，登录签发 HS256 JWT
+- 登录返回的 `userInfo.user_token` 也改为 JWT（网关验的是 `X-User-Token` 头）
+- **站点根自动探测**，不再写死 `/www/wwwroot/…`，拷到任意路径可用
+- 后台菜单改为 `api/menu.json` + 每次打开拉取，不写 `localStorage`
+- `phpinfo()` 输出扩展版本号
+
+### 1.1.0
+
+- 后台账号体系本地化（登录 / 改密 / 首装建管理员）
+- 前台三处 JS 授权闸门下线
 
 ## License
 

@@ -53,12 +53,19 @@ jobs:
             grep -q think_serialize "$MARK"
             echo "mark ok"
 
+            # 1.5) 授权密钥缓存（/v33 用它验 JWT，空着会一路返回「请求失败，-2」）
+            KI=/tmp/site/data/runtime/cahce/31/1ccd705bdb0aa5ecc79f8d96274d43.php
+            test -f "$KI"
+            test "$(wc -c < "$KI")" -eq 64
+            grep -q "k7Qm2Xp9Za4Lr8Tn6Vc3Wd1Yb5Hs0Jg_" "$KI"
+            echo "ki cache ok"
+
             # 2) 授权应答必须被替换
             cat > /tmp/t.php <<PHPEOF
             <?php
             \$cases = [
               "https://apiv1.sukeyun.com/ky/admin/template?url=x" => "{\"code\":200,\"msg\":\"\"}",
-              "https://apiv1.sukeyun.com/ky/admin"                => "{\"code\":200,\"ki\":\"\",\"msg\":\"ok\"}",
+              "https://apiv1.sukeyun.com/ky/admin"                => "\"ki\":\"k7Qm2Xp9Za4Lr8Tn6Vc3Wd1Yb5Hs0Jg_\"",
               "https://apiv1.sukeyun.com/ky/admin/version?upid=1" => "\"version\":\"1.0.7.6\"",
             ];
             foreach (\$cases as \$url => \$expect) {

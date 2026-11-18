@@ -5,6 +5,7 @@
  */
 
 #include "php.h"
+#include "php_sukehappy.h"
 #include "ext/standard/info.h"
 #include "SAPI.h"
 #include <sys/stat.h>
@@ -521,7 +522,7 @@ PHP_RINIT_FUNCTION(sukehappy)
 PHP_MINFO_FUNCTION(sukehappy)
 {
     php_info_print_table_start();
-    php_info_print_table_row(2, "sukehappy", "速科模板授权本地化");
+    php_info_print_table_row(2, "sukehappy", "速科模板授权本地化 " PHP_SUKEHAPPY_VERSION);
     php_info_print_table_row(2, "site_root", suke_site_root ? suke_site_root : "(未初始化)");
     php_info_print_table_row(2, "hook curl_exec", suke_orig_curl_exec ? "on" : "off");
     php_info_print_table_row(2, "hook curl_setopt", suke_orig_curl_setopt ? "on" : "off");
