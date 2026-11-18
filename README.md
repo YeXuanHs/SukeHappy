@@ -270,3 +270,9 @@ sudo make install
 ## License
 
 MIT
+
+仪表盘上的「版本信息」「版本发布日志」两张卡也已移除（`home-widgets` chunk，hash 换成 `6c1a2f9e`），
+顺手把 `登录/注册/访问/IP/在线人数` 的栅格从「半行 + 空位」调成「2×2 + 整行」，
+否则删卡片后会留一块空白。
+
+**注意**：`userCenter.*.js`
