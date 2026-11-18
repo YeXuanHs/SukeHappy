@@ -282,6 +282,7 @@ sudo make install
     与「监控 → 地区」同源，格式一致：`中国福建省莆田市[电信]`
 - 头像改为首字母头像（内联 SVG data URI，蓝底白字），不再用 `/static/images/avatar.jpg`（那是魔方 logo）
 - 菜单再精简：移除 用户空间 / 客服 / 反馈 / 盗版举报；头像下拉去掉「帐号信息」
+- **修路由大小写**：厂商前端内部跳转用的是组件目录名（`/EventManagement/*`、`/ArticleList/*`、`/Foreground/Global`），菜单却写成小写（`/event/*`、`/article/*`、`/foreground/global`），路由没注册 → 点「编辑」白屏。menu.json 里 9 条路径已改成厂商写法
 - 再移除三个**厂商空壳页**（chunk 只有 384~385 字节，`render` 只返回一个空 `div`）：
   「页面内容 → 托管」「前台设置 → 自定义 → 自定义数据」「活动管理 → 模块编辑」
   ——原版包同样如此，不是我们改坏的；叶子 61 → 56

@@ -104,7 +104,7 @@
       "redirect": "/article/content",
       "children": [
         {
-          "path": "/article/content",
+          "path": "/ArticleList/Content",
           "name": "article_content",
           "component": "ArticleList/Content/index",
           "meta": {
@@ -113,7 +113,7 @@
           }
         },
         {
-          "path": "/article/news",
+          "path": "/ArticleList/NewsList",
           "name": "article_news",
           "component": "ArticleList/NewsList/index",
           "meta": {
@@ -122,7 +122,7 @@
           }
         },
         {
-          "path": "/article/news/set",
+          "path": "/ArticleList/journalismset",
           "name": "article_news_set",
           "component": "ArticleList/journalismset/index",
           "meta": {
@@ -131,7 +131,7 @@
           }
         },
         {
-          "path": "/article/help",
+          "path": "/ArticleList/HelpList",
           "name": "article_help",
           "component": "ArticleList/HelpList/index",
           "meta": {
@@ -234,7 +234,7 @@
       "redirect": "/foreground/global",
       "children": [
         {
-          "path": "/foreground/global",
+          "path": "/Foreground/Global",
           "name": "foreground_global",
           "component": "Foreground/Global/index",
           "meta": {
@@ -453,7 +453,7 @@
       ]
     },
     {
-      "path": "/event",
+      "path": "/EventManagement",
       "name": "event",
       "meta": {
         "title": "活动管理",
@@ -462,7 +462,7 @@
       "redirect": "/event/list",
       "children": [
         {
-          "path": "/event/list",
+          "path": "/EventManagement/list",
           "name": "event_list",
           "component": "EventManagement/list/index",
           "meta": {
@@ -471,7 +471,7 @@
           }
         },
         {
-          "path": "/event/publish",
+          "path": "/EventManagement/publish",
           "name": "event_publish",
           "component": "EventManagement/publish/index",
           "meta": {
@@ -480,7 +480,7 @@
           }
         },
         {
-          "path": "/event/edit",
+          "path": "/EventManagement/edit",
           "name": "event_edit",
           "component": "EventManagement/edit/index",
           "meta": {
