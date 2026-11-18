@@ -227,6 +227,32 @@ if (strpos($lower, 'login') !== false) {
     require __DIR__ . '/login.php';
 }
 
+/* 4.5) AI 助手配置：直接读模板设置表 <prefix>tpl_set 的 aikey 行
+ *      与「全局设置 → AI助手设置」同一份数据，前端只用来显示模型名 */
+if (strpos($lower, 'ai/config') !== false) {
+    $me = check_token($authcode);
+    if ($me === null) jout(401, null, '未登录');
+
+    $out = ['model' => '', 'tokens' => '', 'temperature' => '', 'InterfaceAddress' => '', 'hasKey' => false];
+    try {
+        $st = $pdo->prepare("SELECT custom FROM {$pf}tpl_set WHERE name = 'aikey' LIMIT 1");
+        $st->execute();
+        $row = $st->fetch();
+        if ($row && !empty($row['custom'])) {
+            $j = json_decode($row['custom'], true);
+            if (is_array($j)) {
+                $out['model']            = isset($j['model']) ? (string) $j['model'] : '';
+                $out['tokens']           = isset($j['tokens']) ? (string) $j['tokens'] : '';
+                $out['temperature']      = isset($j['temperature']) ? (string) $j['temperature'] : '';
+                $out['InterfaceAddress'] = isset($j['InterfaceAddress']) ? (string) $j['InterfaceAddress'] : '';
+                $out['hasKey']           = !empty($j['apikey']);
+            }
+        }
+    } catch (Throwable $e) {
+    }
+    jout(200, $out, 'success');
+}
+
 /* 5) 登出 */
 if (strpos($lower, 'logout') !== false) {
     setcookie('mdy_mb_token', '', time() - 3600, '/');
