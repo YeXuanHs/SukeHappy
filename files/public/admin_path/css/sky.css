@@ -1,0 +1,65 @@
+/* 速科后台自定义样式（原来由 api-local.js 动态注入，现改为外链） */
+
+/* 右侧表单块垂直居中 */
+.login-container .form-wrapper.right { justify-content: center !important; }
+
+/* 登录页：隐藏用不到的 tab / 附加容器 */
+.loginContent .arco-input-append,
+.loginContent .arco-input-group-addon,
+.loginContent .arco-select,
+.loginContent .arco-tabs-header,
+.loginContent .arco-tabs-nav,
+.loginContent .arco-tabs-tab,
+.loginContent .el-input-group__append,
+.loginContent .el-tabs__header { display: none !important; }
+
+.loginContent .arco-input-outer { background: transparent !important; }
+.loginContent .arco-tabs-content { padding-top: 0 !important; }
+
+/* 首装提示条（登录组件 render 里输出 .sky-first-tip 节点） */
+.sky-first-tip {
+    margin: 0 0 16px;
+    padding: 10px 12px;
+    border-radius: 4px;
+    background: #e8f3ff;
+    color: #0052d9;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+/* 重置密码弹窗 */
+#skyPwdMask {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: skyMaskIn .3s;
+}
+#skyPwdMask > .el-message-box {
+    animation: msgbox-fade-in .3s;
+    width: 420px;
+}
+#skyPwdMask .el-input__prefix {
+    align-items: center;
+    margin-left: 1px;
+    margin-right: 6px;
+}
+#skyPwdForm .mdy-fi { margin-bottom: 14px; }
+#skyPwdForm .mdy-fi:first-child { margin-top: 2px; }
+#skyPwdForm .mdy-fi > label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--el-text-color-regular);
+    font-weight: 400;
+}
+#skyPwdErr {
+    min-height: 18px;
+    line-height: 18px;
+    font-size: 12px;
+    color: var(--el-color-danger);
+    margin: -6px 0 2px;
+}
+
+@keyframes skyMaskIn { from { opacity: 0 } to { opacity: 1 } }
+@keyframes skyMaskOut { from { opacity: 1 } to { opacity: 0 } }
