@@ -120,15 +120,6 @@
             "title": "用户提示",
             "icon": "ElIconBell"
           }
-        },
-        {
-          "path": "/user/space",
-          "name": "user_space",
-          "component": "userCenter/user/space/index",
-          "meta": {
-            "title": "用户空间",
-            "icon": "ElIconFolderOpened"
-          }
         }
       ]
     },
@@ -594,73 +585,6 @@
       ]
     },
     {
-      "path": "/chat",
-      "name": "chat",
-      "meta": {
-        "title": "客服",
-        "icon": "ElIconService"
-      },
-      "redirect": "/chat/message",
-      "children": [
-        {
-          "path": "/chat/message",
-          "name": "chat_message",
-          "component": "Chat/sava/Message/index",
-          "meta": {
-            "title": "会话消息",
-            "icon": "ElIconChatDotRound"
-          }
-        },
-        {
-          "path": "/chat/data",
-          "name": "chat_data",
-          "component": "Chat/sava/DataAnalysis/index",
-          "meta": {
-            "title": "数据分析",
-            "icon": "ElIconDataAnalysis"
-          }
-        },
-        {
-          "path": "/chat/set",
-          "name": "chat_set",
-          "component": "Chat/sava/Chatset/index",
-          "meta": {
-            "title": "聊天设置",
-            "icon": "ElIconSetting"
-          }
-        }
-      ]
-    },
-    {
-      "path": "/feedback",
-      "name": "feedback",
-      "meta": {
-        "title": "反馈",
-        "icon": "ElIconChatLineRound"
-      },
-      "redirect": "/feedback/list",
-      "children": [
-        {
-          "path": "/feedback/list",
-          "name": "feedback_list",
-          "component": "feedback/allfeedback/index",
-          "meta": {
-            "title": "反馈列表",
-            "icon": "ElIconList"
-          }
-        },
-        {
-          "path": "/feedback/submit",
-          "name": "feedback_submit",
-          "component": "feedback/submitfeedback/index",
-          "meta": {
-            "title": "提交反馈",
-            "icon": "ElIconEdit"
-          }
-        }
-      ]
-    },
-    {
       "path": "/seo",
       "name": "seo",
       "meta": {
@@ -773,33 +697,13 @@
       ]
     },
     {
-      "path": "/authorization",
-      "name": "authorization",
+      "path": "/authorization/cx",
+      "name": "authorization_cx",
+      "component": "authorization/cx/index",
       "meta": {
-        "title": "授权",
-        "icon": "ElIconLock"
-      },
-      "redirect": "/authorization/cx",
-      "children": [
-        {
-          "path": "/authorization/cx",
-          "name": "authorization_cx",
-          "component": "authorization/cx/index",
-          "meta": {
-            "title": "授权查询",
-            "icon": "ElIconSearch"
-          }
-        },
-        {
-          "path": "/authorization/piracy",
-          "name": "authorization_piracy",
-          "component": "authorization/piracyReport/index",
-          "meta": {
-            "title": "盗版举报",
-            "icon": "ElIconWarning"
-          }
-        }
-      ]
+        "title": "授权查询",
+        "icon": "ElIconSearch"
+      }
     },
     {
       "path": "/monitoring",
