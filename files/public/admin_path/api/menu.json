@@ -19,35 +19,6 @@
       }
     },
     {
-      "path": "/home",
-      "name": "home",
-      "meta": {
-        "title": "首页装修",
-        "icon": "ElIconGrid"
-      },
-      "redirect": "/home/widgets",
-      "children": [
-        {
-          "path": "/home/widgets",
-          "name": "home_widgets",
-          "component": "home/widgets/index",
-          "meta": {
-            "title": "首页组件",
-            "icon": "ElIconGrid"
-          }
-        },
-        {
-          "path": "/home/widgets/components",
-          "name": "home_widgets_components",
-          "component": "home/widgets/components/index",
-          "meta": {
-            "title": "组件库",
-            "icon": "ElIconBox"
-          }
-        }
-      ]
-    },
-    {
       "path": "/product",
       "name": "product",
       "meta": {
