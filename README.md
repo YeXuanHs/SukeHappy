@@ -270,6 +270,7 @@ sudo make install
   现在在 `scuiChunks` 里统一 `JSON.parse` 成数组（非数组退化为 `[]`）
 - 修「退出登录」点了没反应：原实现只 `router.replace(/login)` 没清 token，被路由守卫弹回
 - 「安全码验证」保留，文案改为「密码」（HTML 编辑 / 全局文件两处）
+- 顶栏「AI 助手」入口恢复（`layout.kh.js`，机器人图标 + `robot()` 切换抽屉）；抽屉本身一直在，只是入口按钮被拿掉了
 
 ### 1.2.0
 
