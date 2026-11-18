@@ -1,11 +1,7 @@
 /*
- * sukehappy —— 速科模板授权本地化
- *
- * 1) 写授权标记文件，让 TemplateBaseController 的检查通过
- * 2) hook curl_*，把授权接口的应答换成本地固定值
- * 3) 拦两个后门 URI
- *
- * 不要 hook zend_execute_ex（loader 会崩），也不要跳过原始 curl handler。
+ * 1.写授权标记文件，让后端检测授权通过
+ * 2.hook curl_*，把授权接口的应答换成已授权
+ * 3.拦截后门
  */
 
 #include "php.h"
@@ -20,7 +16,7 @@
 #endif
 
 #if PHP_VERSION_ID < 70200
-# error "sukehappy 支持 PHP 7.2 ~ 7.4"
+# error "sukehappy 仅支持 PHP 7.2 ~ 7.4"
 #endif
 
 #define SUKE_LOG_PATH "/tmp/sukehappy.log"
@@ -31,7 +27,7 @@
 /* CURLINFO_HTTP_CODE */
 #define SUKE_CURLINFO_HTTP_CODE 2097154
 
-/* 授权接口应答 */
+/* 授权接口伪造 */
 #define SUKE_BODY_TEMPLATE  "{\"code\":200,\"msg\":\"\"}"
 #define SUKE_BODY_BASE      "{\"code\":200,\"ki\":\"\",\"msg\":\"ok\"}"
 #define SUKE_BODY_VERIFY    "{\"code\":200,\"msg\":\"ok\"}"
@@ -46,7 +42,7 @@ static const char *suke_bad_uris[] = {
 static char suke_root_buf[1024];
 static char *suke_site_root = NULL;
 
-/* 句柄 → URL 表，固定数组，不分配内存 */
+/* 句柄 - URL 表 */
 #define SUKE_URL_MAX 64
 #define SUKE_URL_LEN 512
 static struct {
@@ -125,7 +121,7 @@ static const char *suke_body_for(const char *url)
     if (!url || !*url) return NULL;
     if (!strstr(url, "apiv1.sukeyun.com")) return NULL;
 
-    /* 具体路径优先，"/ky/admin" 兜底放最后 */
+    /* 路径优先级，"/ky/admin" 兜底放最后 */
     if (strstr(url, "/ky/admin/template"))     return SUKE_BODY_TEMPLATE;
     if (strstr(url, "/ky/admin/verification")) return SUKE_BODY_VERIFY;
     if (strstr(url, "/ky/admin/version"))      return SUKE_BODY_VERSION;
@@ -178,7 +174,7 @@ static void suke_curl_exec(INTERNAL_FUNCTION_PARAMETERS)
                 ? ZEND_CALL_ARG(execute_data, 1) : NULL;
     const char *url = suke_url_get(zch);
 
-    /* 必须走原始 handler：跳过会让 curl 句柄半初始化，析构时 libcurl 崩 */
+    /* 走原始 handler */
     if (suke_orig_curl_exec) {
         suke_orig_curl_exec(INTERNAL_FUNCTION_PARAM_PASSTHRU);
     }
@@ -200,7 +196,7 @@ static void suke_curl_exec(INTERNAL_FUNCTION_PARAMETERS)
     }
 }
 
-/* 模板还会看 curl_error / curl_getinfo，一并伪装成功，否则走 CURL ERROR 分支 */
+/* curl_error / curl_getinfo，一并伪装成功，否则走 CURL ERROR 分支 */
 static void suke_curl_error(INTERNAL_FUNCTION_PARAMETERS)
 {
     zval *zch = (ZEND_CALL_NUM_ARGS(execute_data) >= 1)
