@@ -166,6 +166,31 @@ chown -R www:www public
 - 覆盖完让浏览器强刷一次（Ctrl+F5）。
 - 后台目录名取错会连到别的库，务必先 `cat public/install.lock` 确认。
 
+## 精简菜单 / 删除多余页面
+
+菜单是 `api/menu.json`，路由由它动态注册 —— **从里面删掉一项，页面和路由就都没了**。
+当前默认菜单已经去掉：用户空间、客服、反馈、盗版举报（一级 14 项、叶子 61 个）。
+
+对应页面的 chunk 文件还能用脚本清掉（不做也不影响，只是占空间）：
+
+```bash
+./tools/remove-pages.sh /www/wwwroot/你的站点/public/<后台目录>/js /root/bak-chunks
+```
+
+删掉的 10 个 chunk：
+
+```
+userCenter-user-space
+Chat-Chatset / Chat-DataAnalysis / Chat-Message
+Chat-sava-DataAnalysis / Chat-sava-Message
+feedback-allfeedback / feedback-allfeedback-fullpage / feedback-submitfeedback
+authorization-piracyReport
+```
+
+**注意**：`userCenter.*.js`（个人中心）里还挂着 `space` 这个懒加载组件，
+所以「头像下拉 → 帐号信息」跳的 `/usercenter` 没有路由（会落到 404 页）。
+要用这个入口的话，把 `userCenter/index` 加回菜单，并保留 `userCenter-user-space` 这个 chunk。
+
 ## 体检脚本
 
 `tools/doctor.php` —— 引导站点应用，**直接调用模板自己的函数**，回报两件事：
