@@ -169,6 +169,46 @@ if (strpos($lower, 'status') !== false) {
     jout(200, ['hasAccount' => $hasAccount]);
 }
 
+/* 1.5) 二次验证：HTML 编辑 / 全局文件 的「安全保护」——改成校验管理员密码
+ *   原后端 /basics/htmlsafecode 任何非空值都返回“验证成功”，等于没有校验。
+ *   GET ?code=xxx  不带 code 只查状态；带 code 校验 mb_admin_pass，成功发 1 小时 cookie */
+if (strpos($lower, 'safecode') !== false) {
+    $me = check_token($authcode);
+    if ($me === null) {
+        jout(401, null, '未登录');
+    }
+
+    $SEC_COOKIE = 'mdy_sec_ok';
+    $sub = (string) ($body['code'] ?? $body['password'] ?? ($_GET['code'] ?? ''));
+
+    /* 已验过（1 小时内）？ */
+    $verified = false;
+    $raw = $_COOKIE[$SEC_COOKIE] ?? '';
+    if ($raw !== '' && substr_count($raw, '.') === 1) {
+        list($ts, $sig) = explode('.', $raw, 2);
+        $ts = (int) $ts;
+        $want = hash_hmac('sha256', $ts . '|' . $me, $authcode);
+        if ($ts > 0 && (time() - $ts) < 3600 && hash_equals($want, $sig)) {
+            $verified = true;
+        }
+    }
+
+    /* 只查状态：返回 msg，前端看到非空 msg 就弹遮罩 */
+    if ($sub === '') {
+        jout(200, ['msg' => $verified ? '' : '请输入密码进行验证'], 'success');
+    }
+
+    $hash = cfg_get($pdo, $pf, 'mb_admin_pass');
+    if (!$hash || !password_verify($sub, $hash)) {
+        jout(400, null, '密码不正确');
+    }
+
+    $ts = time();
+    $sig = hash_hmac('sha256', $ts . '|' . $me, $authcode);
+    setcookie($SEC_COOKIE, $ts . '.' . $sig, $ts + 3600, '/', '', false, true);
+    jout(200, '密码验证成功，过期时间为1小时', 'success');
+}
+
 /* 2) 会话校验（页面加载时调用） */
 if (strpos($lower, 'verify') !== false) {
     $u = check_token($authcode);

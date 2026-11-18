@@ -171,6 +171,7 @@ chown -R www:www public
 | `api/login.php` | **新增**：登录 + 首装建管理员 + 签发 HS256 JWT |
 | `api/jwt.php` | **新增**：JWT 签名/验签，密钥与 `.so` 的 `ki` 一致 |
 | `api/menu.json` | **新增**：后台菜单树（68 个页面，前端启动时读取，不写 localStorage） |
+| `api/router.php` → `/v1/UserInformation/safecode` | **新增**：HTML 编辑/全局文件 的二次验证，改成校验管理员密码（`mb_admin_pass`，`password_verify`），通过后发 `mdy_sec_ok` HttpOnly cookie，1 小时有效 |
 | `api/net.php` | **新增**：客户端 IP / ip2region 归属地 / 首字母头像 |
 | `js/app.0589beb3.js` | `ADMIN_URL` 指向本地接口；chunk 映射；菜单改为读 `api/menu.json` |
 | `js/layout.ke.js` | 下拉菜单「重置密码」+ 弹窗实现（Chunk `7225`） |
