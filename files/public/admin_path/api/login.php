@@ -30,7 +30,7 @@ if (!$hasAccount) {
         'token'  => $token,
         'expire' => SUKE_JWT_TTL,
         'userInfo' => [
-            'user_token' => $user,
+            'user_token' => $token,
             'username'   => $user,
             'email'      => $user,
             'nickname'   => $user,
@@ -58,7 +58,7 @@ jout(200, [
     'token'  => $token,
     'expire' => SUKE_JWT_TTL,
     'userInfo' => [
-        'user_token' => $user,
+        'user_token' => $token,
         'username'   => $user,
         'email'      => cfg_get($pdo, $pf, 'mb_admin_email') ?: $user,
         'nickname'   => $user,

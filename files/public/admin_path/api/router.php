@@ -111,11 +111,12 @@ if (strpos($lower, 'verify') !== false) {
     if ($u === null) {
         jout(400, null, '未登录');
     }
+    $tok = suke_issue_token($u);
     jout(200, [
-        'token' => $u,
+        'token' => $tok,
         'expire' => 518400,
         'userInfo' => [
-            'user_token' => $u,
+            'user_token' => $tok,
             'username' => $u,
             'email' => cfg_get($pdo, $pf, 'mb_admin_email') ?: ($u . '@local'),
             'nickname' => $u,
