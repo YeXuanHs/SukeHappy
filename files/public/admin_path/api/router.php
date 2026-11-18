@@ -253,6 +253,106 @@ if (strpos($lower, 'ai/config') !== false) {
     jout(200, $out, 'success');
 }
 
+/* 4.6) AI 对话：后端转发给 OpenAI（前端只发上下文，不碰 key）
+ *      配置全部取 <prefix>tpl_set 的 aikey 行，与「全局设置 → AI助手设置」同一份
+ *      响应格式按前端约定：纯文本 + [FINISH_AI_A_B] + 28 位 key */
+if (strpos($lower, 'ai/chat') !== false) {
+    $me = check_token($authcode);
+    if ($me === null) jout(401, null, '未登录');
+
+    $in = json_decode(file_get_contents('php://input'), true);
+    if (!is_array($in)) $in = [];
+
+    $ai = ['apikey' => '', 'model' => 'gpt-4o-mini', 'tokens' => '', 'temperature' => '',
+           'InterfaceAddress' => 'https://api.openai.com', 'proxystate' => '0', 'proxy' => ''];
+    try {
+        $st = $pdo->prepare("SELECT custom FROM {$pf}tpl_set WHERE name = 'aikey' LIMIT 1");
+        $st->execute();
+        $row = $st->fetch();
+        if ($row && !empty($row['custom'])) {
+            $j = json_decode($row['custom'], true);
+            if (is_array($j)) $ai = array_merge($ai, array_intersect_key($j, $ai));
+        }
+    } catch (Throwable $e) {
+    }
+
+    if (empty($ai['apikey'])) {
+        echo json_encode(['code' => 201, 'message' => '请先在「全局设置 → AI助手设置」填写 APIKEY'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    /* 组装消息：prompt 作 system，context 里 user 保持 user，其余视为 assistant */
+    $messages = [];
+    if (!empty($in['prompt'])) {
+        $messages[] = ['role' => 'system', 'content' => (string) $in['prompt']];
+    }
+    if (!empty($in['context']) && is_array($in['context'])) {
+        foreach ($in['context'] as $c) {
+            if (!is_array($c)) continue;
+            $role = (isset($c['role']) && $c['role'] === 'user') ? 'user' : 'assistant';
+            $messages[] = ['role' => $role, 'content' => (string) ($c['content'] ?? '')];
+        }
+    }
+    if (!$messages) {
+        $messages[] = ['role' => 'user', 'content' => (string) ($in['name'] ?? '你好')];
+    }
+
+    $payload = [
+        'model'    => (string) ($ai['model'] ?: 'gpt-4o-mini'),
+        'messages' => $messages,
+        'stream'   => false,
+    ];
+    if (!empty($ai['tokens'])) {
+        $payload['max_tokens'] = (int) $ai['tokens'];
+    }
+    if ($ai['temperature'] !== '') {
+        $payload['temperature'] = (float) $ai['temperature'];
+    }
+
+    $url = rtrim($ai['InterfaceAddress'] ?: 'https://api.openai.com', '/') . '/v1/chat/completions';
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 15,
+        CURLOPT_TIMEOUT        => 120,
+        CURLOPT_HTTPHEADER     => [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $ai['apikey'],
+        ],
+        CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
+    ]);
+    if ($ai['proxystate'] === '1' && !empty($ai['proxy'])) {
+        curl_setopt($ch, CURLOPT_PROXY, $ai['proxy']);
+    }
+
+    $resp = curl_exec($ch);
+    $cerr = curl_error($ch);
+    $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($resp === false || $code >= 400 || $code === 0) {
+        $msg = $cerr !== '' ? $cerr : ('HTTP ' . $code);
+        $j = json_decode((string) $resp, true);
+        if (is_array($j) && isset($j['error']['message'])) {
+            $msg = $j['error']['message'];
+        }
+        echo json_encode(['code' => 201, 'message' => 'AI 接口错误：' . $msg], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $j = json_decode((string) $resp, true);
+    $text = isset($j['choices'][0]['message']['content']) ? (string) $j['choices'][0]['message']['content'] : '';
+    if ($text === '') {
+        echo json_encode(['code' => 201, 'message' => 'AI 未返回内容'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    echo $text . '[FINISH_AI_A_B]' . bin2hex(random_bytes(14));
+    exit;
+}
+
 /* 5) 登出 */
 if (strpos($lower, 'logout') !== false) {
     setcookie('mdy_mb_token', '', time() - 3600, '/');
