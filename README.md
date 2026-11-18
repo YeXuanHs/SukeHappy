@@ -271,6 +271,7 @@ sudo make install
   现在在 `scuiChunks` 里统一 `JSON.parse` 成数组（非数组退化为 `[]`）
 - 修「退出登录」点了没反应：原实现只 `router.replace(/login)` 没清 token，被路由守卫弹回
 - 「安全码验证」保留，文案改为「密码」（HTML 编辑 / 全局文件两处）
+- AI 对话支持**流式**：后端向上游请求 `stream:true`，用 `CURLOPT_WRITEFUNCTION` 逐行解 `data:`，把 `delta.content` 立刻 `echo`+`flush()`（配 `X-Accel-Buffering: no`），结束再追 `[FINISH_AI_A_B]`+28 位 key
 - AI 对话改为**后端转发**：前端 POST `api/router.php?__p=/v1/Ai/chat`，后端读 `<prefix>tpl_set.aikey`（地址/key/模型/tokens/温度）→ curl 调 `{地址}/v1/chat/completions` → 把内容 + `[FINISH_AI_A_B]` + 28 位 key 回给前端。前端不接触 key，`model` 也由后端配置决定
 - 顶栏「AI 助手」入口恢复（`layout.kh.js`，机器人图标 + `robot()` 切换抽屉）；抽屉本身一直在，只是入口按钮被拿掉了
 

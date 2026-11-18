@@ -253,9 +253,9 @@ if (strpos($lower, 'ai/config') !== false) {
     jout(200, $out, 'success');
 }
 
-/* 4.6) AI 对话：后端转发给 OpenAI（前端只发上下文，不碰 key）
- *      配置全部取 <prefix>tpl_set 的 aikey 行，与「全局设置 → AI助手设置」同一份
- *      响应格式按前端约定：纯文本 + [FINISH_AI_A_B] + 28 位 key */
+/* 4.6) AI 对话：后端转发（流式）
+ *      上游 SSE → 这里逐块 echo 纯文本增量 → 结束追 [FINISH_AI_A_B]+28位key
+ *      前端已是边读边拼，所以是打字机效果；key 只存在后端，前端不接触 */
 if (strpos($lower, 'ai/chat') !== false) {
     $me = check_token($authcode);
     if ($me === null) jout(401, null, '未登录');
@@ -275,6 +275,11 @@ if (strpos($lower, 'ai/chat') !== false) {
         }
     } catch (Throwable $e) {
     }
+
+    $fail = function ($msg) {
+        echo json_encode(['code' => 201, 'message' => 'AI 接口错误：' . $msg], JSON_UNESCAPED_UNICODE);
+        exit;
+    };
 
     if (empty($ai['apikey'])) {
         echo json_encode(['code' => 201, 'message' => '请先在「全局设置 → AI助手设置」填写 APIKEY'], JSON_UNESCAPED_UNICODE);
@@ -300,7 +305,7 @@ if (strpos($lower, 'ai/chat') !== false) {
     $payload = [
         'model'    => (string) ($ai['model'] ?: 'gpt-4o-mini'),
         'messages' => $messages,
-        'stream'   => false,
+        'stream'   => true,
     ];
     if (!empty($ai['tokens'])) {
         $payload['max_tokens'] = (int) $ai['tokens'];
@@ -311,45 +316,91 @@ if (strpos($lower, 'ai/chat') !== false) {
 
     $url = rtrim($ai['InterfaceAddress'] ?: 'https://api.openai.com', '/') . '/v1/chat/completions';
 
+    header('Content-Type: text/plain; charset=utf-8');
+    header('Cache-Control: no-cache, no-store');
+    header('X-Accel-Buffering: no');
+
+    while (ob_get_level() > 0) {
+        @ob_end_flush();
+    }
+    @ob_implicit_flush(true);
+
+    $buf = '';
+    $sent = 0;
+    $errMsg = '';
+    $rawHead = '';
+
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_POST           => true,
-        CURLOPT_RETURNTRANSFER => true,
         CURLOPT_CONNECTTIMEOUT => 15,
-        CURLOPT_TIMEOUT        => 120,
+        CURLOPT_TIMEOUT        => 180,
         CURLOPT_HTTPHEADER     => [
             'Content-Type: application/json',
+            'Accept: text/event-stream',
             'Authorization: Bearer ' . $ai['apikey'],
         ],
         CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_WRITEFUNCTION  => function ($ch, $chunk) use (&$buf, &$sent, &$errMsg, &$rawHead) {
+            if ($rawHead === '' && $sent === 0) {
+                $rawHead = substr($chunk, 0, 400);
+            }
+            $buf .= $chunk;
+            while (($pos = strpos($buf, "\n")) !== false) {
+                $line = trim(substr($buf, 0, $pos));
+                $buf = substr($buf, $pos + 1);
+
+                if ($line === '' || strncmp($line, 'data:', 5) !== 0) continue;
+
+                $data = trim(substr($line, 5));
+                if ($data === '' || $data === '[DONE]') continue;
+
+                $j = json_decode($data, true);
+                if (!is_array($j)) continue;
+
+                if (isset($j['error']['message'])) {
+                    $errMsg = (string) $j['error']['message'];
+                    continue;
+                }
+                $delta = '';
+                if (isset($j['choices'][0]['delta']['content'])) {
+                    $delta = (string) $j['choices'][0]['delta']['content'];
+                } elseif (isset($j['choices'][0]['text'])) {
+                    $delta = (string) $j['choices'][0]['text'];
+                }
+                if ($delta !== '') {
+                    echo $delta;
+                    flush();
+                    $sent += strlen($delta);
+                }
+            }
+            return strlen($chunk);
+        },
     ]);
     if ($ai['proxystate'] === '1' && !empty($ai['proxy'])) {
         curl_setopt($ch, CURLOPT_PROXY, $ai['proxy']);
     }
 
-    $resp = curl_exec($ch);
+    curl_exec($ch);
     $cerr = curl_error($ch);
     $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
-    if ($resp === false || $code >= 400 || $code === 0) {
-        $msg = $cerr !== '' ? $cerr : ('HTTP ' . $code);
-        $j = json_decode((string) $resp, true);
-        if (is_array($j) && isset($j['error']['message'])) {
-            $msg = $j['error']['message'];
+    /* 一个字都没发出去：把错误当 JSON 回，前端能弹提示 */
+    if ($sent === 0) {
+        $msg = $errMsg;
+        if ($msg === '') {
+            $msg = $cerr !== '' ? $cerr : ('HTTP ' . $code);
         }
-        echo json_encode(['code' => 201, 'message' => 'AI 接口错误：' . $msg], JSON_UNESCAPED_UNICODE);
-        exit;
+        /* 有些中转直接把错误 JSON 打回来，没有 SSE 包装，这里兜一下 */
+        $j = json_decode(trim($rawHead), true);
+        if (is_array($j) && isset($j['error']['message'])) {
+            $msg = (string) $j['error']['message'];
+        }
+        $fail($msg);
     }
 
-    $j = json_decode((string) $resp, true);
-    $text = isset($j['choices'][0]['message']['content']) ? (string) $j['choices'][0]['message']['content'] : '';
-    if ($text === '') {
-        echo json_encode(['code' => 201, 'message' => 'AI 未返回内容'], JSON_UNESCAPED_UNICODE);
-        exit;
-    }
-
-    echo $text . '[FINISH_AI_A_B]' . bin2hex(random_bytes(14));
+    echo '[FINISH_AI_A_B]' . bin2hex(random_bytes(14));
     exit;
 }
 
