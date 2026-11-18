@@ -21,6 +21,10 @@
 
 #define SUKE_LOG_PATH "/tmp/sukehappy.log"
 #define SUKE_MARK_REL "/data/runtime/cahce/08/d84096246ac19a1f12adfa064bb0fa.php"
+/* 授权密钥：与 jwt.php 里 SUKE_JWT_SECRET 必须一致 */
+#define SUKE_KI     "k7Qm2Xp9Za4Lr8Tn6Vc3Wd1Yb5Hs0Jg_"
+/* Cache("hzdtqmwbodere7d9") 的落盘文件（md5 前两位做子目录） */
+#define SUKE_KI_REL "/data/runtime/cahce/31/1ccd705bdb0aa5ecc79f8d96274d43.php"
 
 /* CURLOPT_URL */
 #define SUKE_CURLOPT_URL 10002
@@ -365,6 +369,42 @@ static void suke_mkdir_p(const char *path)
     mkdir(buf, 0755);
 }
 
+/* 写授权密钥缓存：模板的 /v33 用它验 JWT，空着会一路返回「请求失败，-2」 */
+static void suke_write_ki_cache(void)
+{
+    char path[1400];
+    char dir[1300];
+    const char *root = suke_site_root;
+    FILE *fp;
+    long sz = -1;
+    const long want = (long) (strlen("<?php\n//000000000000\n exit();?>\n") + strlen(SUKE_KI));
+
+    if (!root || !*root) return;
+
+    snprintf(path, sizeof path, "%s%s", root, SUKE_KI_REL);
+
+    fp = fopen(path, "r");
+    if (fp) {
+        if (fseek(fp, 0, SEEK_END) == 0) sz = ftell(fp);
+        fclose(fp);
+        if (sz == want) return;
+    }
+
+    snprintf(dir, sizeof dir, "%s/data/runtime/cahce/31", root);
+    suke_mkdir_p(dir);
+
+    fp = fopen(path, "w");
+    if (!fp) {
+        suke_log("[sukehappy] 写 ki 缓存失败: %s\n", path);
+        return;
+    }
+    fputs("<?php\n//000000000000\n exit();?>\n", fp);
+    fputs(SUKE_KI, fp);
+    fclose(fp);
+    chmod(path, 0644);
+    suke_log("[sukehappy] 已写 ki 缓存: %s\n", path);
+}
+
 static void suke_write_auth_mark(void)
 {
     char path[1400];
@@ -432,6 +472,7 @@ PHP_RINIT_FUNCTION(sukehappy)
     }
 
     suke_write_auth_mark();
+    suke_write_ki_cache();
     return SUCCESS;
 }
 
