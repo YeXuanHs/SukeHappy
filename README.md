@@ -55,9 +55,8 @@ SUKE_SITE_ROOT=/www/wwwroot/你的站点
 
 `/etc/hosts` 里保留 `127.0.0.1 apiv1.sukeyun.com`，但 **443 不监听** —— 真实请求会立刻
 `ECONNREFUSED`（毫秒级），没有 TLS 握手也没有外网流量，返回值由扩展覆盖。
-v3 曾用「自签证书 + 本地 HTTPS mock 服务」，v4 已不需要。
 
-**关于在线更新**：v4 只伪造 `/ky/admin*` 这几个授权接口。后台「检测更新」走的是
+**关于在线更新**：扩展只伪造 `/ky/admin*` 这几个授权接口。后台「检测更新」走的是
 `/v1/VersionInformation/*`，仍是官方地址，而 hosts 把它指到了本机，所以检测会失败。
 要用官方在线更新，得去掉 hosts 那条并具备站点授权。
 
@@ -73,9 +72,6 @@ v3 曾用「自签证书 + 本地 HTTPS mock 服务」，v4 已不需要。
 extension=/path/to/sukehappy-7.4-nts-linux-x86_64.so
 ```
 
-这些 `.so` 是打 tag 时由 GitHub Actions 用官方 `php:<ver>-cli` 镜像编译、跑完冒烟测试后自动挂到 Release 的，
-和仓库源码版本严格对应，不用自己编（想自己编见《本地编译》）。
-
 三个版本都用源码实测过（PHP 7.2.34 / 7.3.34 / 7.4.33）：编译与运行时注入全通过。
 代码里只有一处版本门限 `PHP_VERSION_ID < 70200` 会报错，没有任何版本分支。
 
@@ -88,7 +84,6 @@ php -m | grep sukehappy
 ### 第二步：覆盖 `files/` 里的文件
 
 `files/` 是**前端补丁**，必须按目录对应关系覆盖到站点里，否则后台登录/菜单/重置密码、前台授权闸门的改动都不会出现。
-（它就是仓库根目录下的 `files/`，Release 页的 `Source code (zip)` 里也带着。）
 
 | 仓库里的路径 | 覆盖到站点 |
 |---|---|
@@ -96,8 +91,6 @@ php -m | grep sukehappy
 | `files/public/themes/web/www/static/script/common.js` | 同路径 |
 | `files/public/themes/clientarea/userCenter/static/script/common.js` | 同路径 |
 | `files/public/themes/cart/server/static/script/cart.js` | 同路径 |
-
-**后台目录不是固定的**，`mdy` / `mbadmin` / `222` 都可能，以 `public/install.lock` 里的 `Admin path:` 为准，不要照抄：
 
 ```bash
 cd /www/wwwroot/你的站点
@@ -130,7 +123,6 @@ chown -R www:www public
 几个坑：
 
 - **文件名里的哈希不要改**（`layout.k8.js`、`scuiChunks.k2.js`）。文件名由 `app.js` 里的映射表指定，哈希同时承担缓存失效；只替换内容不改名，老用户 12 小时内看不到更新。
-- 后台账号与魔方主库账号**是分开的**。库里没有 `mb_admin_user` / `mb_admin_pass` 时，登录页会变成「创建管理员账号」，创建后才回到普通登录。
 - 覆盖完让浏览器强刷一次（Ctrl+F5）。
 - 后台目录名取错会连到别的库，务必先 `cat public/install.lock` 确认。
 
@@ -148,7 +140,7 @@ php tools/doctor.php --root=/www/wwwroot/你的站点 --host=你的域名 --url=
 | 检查项 | 怎么判断 |
 |---|---|
 | 授权状态 | 调 `templateAuthorization()`；未授权时该函数会 `exit("授权错误，错误码U-x")`，脚本捕获后判为未授权 |
-| 授权刷新 | 调 `getAuthorizationCurl()`，看能否正常返回（v4 下 `ki` 为空串，这是有意的） |
+| 授权刷新 | 调 `getAuthorizationCurl()`，看能否正常返回（`ki` 为空串，这是有意的） |
 | 授权缓存 | 读 `Cache::get('hzdtqmwbodere7d9')`、`Cache::get('8ue6hpsuffpheaaj')`，即 app 自己认的授权状态 |
 | 在线更新 | 调 `getNewVersion()`，返回版本信息=可用，返回 `error`=不可用 |
 | 后门入口 | 给了 `--url` 才查，HTTP 403/404/444 视为已封 |
@@ -158,7 +150,7 @@ php tools/doctor.php --root=/www/wwwroot/你的站点 --host=你的域名 --url=
 ```
   [ OK ] 扩展已加载        sukehappy
   [ OK ] 授权状态           已授权（templateAuthorization 正常返回）
-  [ -- ] 授权缓存 ki        无（v4 不生成 ki，模板也不需要）
+  [ -- ] 授权缓存 ki        无（不生成 ki，模板也不需要）
   [ OK ] 授权标记 web       "web" 已写入
   [ -- ] 在线更新           不可用（/v1 被 hosts 指到本机）
   [ OK ] 后门入口 /i5nyyoblvmcpuj71   HTTP 404
@@ -184,7 +176,7 @@ sudo make install
 ## 说明
 
 - 后门拦截只做**阻断**，命中即 404 + `zend_bailout()`，不输出任何内容。
-- 拦的是「函数名」，不是「类方法」——v4 已不再拦函数，仅按 URI 拦这两条后门路由。
+- 拦的是「函数名」，不是「类方法」——已不再拦函数，仅按 URI 拦这两条后门路由。
 - curl 应答替换只对 `apiv1.sukeyun.com` 的 `/ky/admin*` 生效，其余域名原样透传。
 - 不修改任何加密文件，也不改业务逻辑；授权标记与应答替换全部在运行时完成。
 - 这是**缓解手段**，不是根治。根治要打官方补丁或替换掉含后门的加密文件。
