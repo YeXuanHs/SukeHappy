@@ -252,6 +252,16 @@ sudo make install
 
 ## 更新日志
 
+### 未发布
+
+- 首页欢迎卡补齐三项空缺：`上次登陆 / 登录IP / 登录地点`
+  - 登录时记 `mb_admin_last_login` / `_ip` / `_loc` 到 `shd_tpl_config`，下次登录显示
+  - 归属地复用模板自带 `ip2region`（`app/template/vendor/zoujingli/ip2region`），
+    与「监控 → 地区」同源，格式一致：`中国福建省莆田市[电信]`
+- 头像改为首字母头像（内联 SVG data URI，蓝底白字），不再用 `/static/images/avatar.jpg`（那是魔方 logo）
+- 菜单再精简：移除 用户空间 / 客服 / 反馈 / 盗版举报；头像下拉去掉「帐号信息」
+- 仪表盘去掉「版本信息」「版本发布日志」两张卡，栅格调成 2×2 + 整行
+
 ### 1.2.0
 
 - **修通 `/v33`**：`.so` 现在会写入授权密钥缓存 `cahce/31/1ccd705bdb0aa5ecc79f8d96274d43.php`，

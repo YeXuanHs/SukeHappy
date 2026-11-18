@@ -18,6 +18,7 @@ header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 
 require __DIR__ . '/jwt.php';
+require __DIR__ . '/net.php';
 
 $ROOT = dirname(__DIR__, 3);                 // public/mbadmin/api -> 站点根
 $cfg  = require $ROOT . '/app/config/database.php';
@@ -83,6 +84,32 @@ function check_token($authcode = '')
     return $claims['username'] ?? ($claims['sub'] ?? null);
 }
 
+
+/* ---------- 登录信息（首页欢迎卡用） ---------- */
+function suke_user_info(PDO $pdo, $pf, $user, $token, $msg = '')
+{
+    return [
+        'user_token'    => $token,
+        'username'      => $user,
+        'nickname'      => $user,
+        'email'         => cfg_get($pdo, $pf, 'mb_admin_email') ?: $user,
+        'avatar'        => suke_letter_avatar($user),
+        'last_login'    => cfg_get($pdo, $pf, 'mb_admin_last_login') ?: '首次登录',
+        'last_login_ip' => cfg_get($pdo, $pf, 'mb_admin_last_ip') ?: '—',
+        'location'      => cfg_get($pdo, $pf, 'mb_admin_last_loc') ?: '—',
+    ];
+}
+
+/* 记下本次登录，下次登录时给欢迎卡显示 */
+function suke_note_login(PDO $pdo, $pf)
+{
+    $ip  = suke_client_ip();
+    $loc = suke_ip_region($ip);
+    cfg_set($pdo, $pf, 'mb_admin_last_login', date('Y-m-d H:i:s'), '最近登录时间');
+    cfg_set($pdo, $pf, 'mb_admin_last_ip', $ip, '最近登录IP');
+    cfg_set($pdo, $pf, 'mb_admin_last_loc', $loc, '最近登录地点');
+}
+
 /* ---------- 账号状态 ---------- */
 $adminUser = cfg_get($pdo, $pf, 'mb_admin_user');
 $adminPass = cfg_get($pdo, $pf, 'mb_admin_pass');
@@ -115,12 +142,7 @@ if (strpos($lower, 'verify') !== false) {
     jout(200, [
         'token' => $tok,
         'expire' => 518400,
-        'userInfo' => [
-            'user_token' => $tok,
-            'username' => $u,
-            'email' => cfg_get($pdo, $pf, 'mb_admin_email') ?: ($u . '@local'),
-            'nickname' => $u,
-        ],
+        'userInfo' => suke_user_info($pdo, $pf, $u, $tok),
     ], 'success');
 }
 

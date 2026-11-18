@@ -26,15 +26,12 @@ if (!$hasAccount) {
 
     $token = suke_issue_token($user);
     setcookie('mdy_mb_token', $token, time() + SUKE_JWT_TTL, '/', '', false, true);
+    $uinfo = suke_user_info($pdo, $pf, $user, $token);
+    suke_note_login($pdo, $pf);
     jout(200, [
         'token'  => $token,
         'expire' => SUKE_JWT_TTL,
-        'userInfo' => [
-            'user_token' => $token,
-            'username'   => $user,
-            'email'      => $user,
-            'nickname'   => $user,
-        ],
+        'userInfo' => $uinfo,
     ], '管理员账号已创建');
 }
 
@@ -54,13 +51,10 @@ if (!password_verify($pass, $adminPass)) {
 
 $token = suke_issue_token($user);
 setcookie('mdy_mb_token', $token, time() + SUKE_JWT_TTL, '/', '', false, true);
+$uinfo = suke_user_info($pdo, $pf, $user, $token);
+suke_note_login($pdo, $pf);
 jout(200, [
     'token'  => $token,
     'expire' => SUKE_JWT_TTL,
-    'userInfo' => [
-        'user_token' => $token,
-        'username'   => $user,
-        'email'      => cfg_get($pdo, $pf, 'mb_admin_email') ?: $user,
-        'nickname'   => $user,
-    ],
+    'userInfo' => $uinfo,
 ], 'success');
