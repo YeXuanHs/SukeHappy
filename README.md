@@ -187,9 +187,11 @@ feedback-allfeedback / feedback-allfeedback-fullpage / feedback-submitfeedback
 authorization-piracyReport
 ```
 
-**注意**：`userCenter.*.js`（个人中心）里还挂着 `space` 这个懒加载组件，
-所以「头像下拉 → 帐号信息」跳的 `/usercenter` 没有路由（会落到 404 页）。
-要用这个入口的话，把 `userCenter/index` 加回菜单，并保留 `userCenter-user-space` 这个 chunk。
+头像下拉也同步精简过：**「帐号信息」已移除**（它跳的 `/usercenter` 在精简后的菜单里没有路由），
+现在只剩「更新菜单 / 清除缓存 / 重置密码 / 退出登录」。
+
+要恢复个人中心的话：把 `userCenter/index` 加回 `api/menu.json`，并把 `userCenter-user-space` 这个 chunk 从备份拿回来
+（`userCenter.js` 里 `space` 是懒加载，缺了不影响主页面，只是那个 tab 打不开）。
 
 ## 体检脚本
 
