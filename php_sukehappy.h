@@ -4,7 +4,7 @@
 extern zend_module_entry sukehappy_module_entry;
 #define phpext_sukehappy_ptr &sukehappy_module_entry
 
-#define PHP_SUKEHAPPY_VERSION "2.0.0"
+#define PHP_SUKEHAPPY_VERSION "1.1.0"
 
 ZEND_BEGIN_MODULE_GLOBALS(sukehappy)
     char *logfile;

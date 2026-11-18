@@ -53,13 +53,6 @@ SUKE_SITE_ROOT=/www/wwwroot/你的站点
 | `/ky/admin/version` | `{…,"data":{"version":"1.0.7.6"}}` | |
 | `/ky/admin/callback` | `{"code":200,"msg":"ok"}` | |
 
-`/etc/hosts` 里保留 `127.0.0.1 apiv1.sukeyun.com`，但 **443 不监听** —— 真实请求会立刻
-`ECONNREFUSED`（毫秒级），没有 TLS 握手也没有外网流量，返回值由扩展覆盖。
-
-**关于在线更新**：扩展只伪造 `/ky/admin*` 这几个授权接口。后台「检测更新」走的是
-`/v1/VersionInformation/*`，仍是官方地址，而 hosts 把它指到了本机，所以检测会失败。
-要用官方在线更新，得去掉 hosts 那条并具备站点授权。
-
 ## 安装
 
 安装分两步：**装扩展** + **覆盖 `files/` 里的文件**。只装扩展，后台和前台的那部分改动不会生效。
@@ -152,7 +145,7 @@ php tools/doctor.php --root=/www/wwwroot/你的站点 --host=你的域名 --url=
   [ OK ] 授权状态           已授权（templateAuthorization 正常返回）
   [ -- ] 授权缓存 ki        无（不生成 ki，模板也不需要）
   [ OK ] 授权标记 web       "web" 已写入
-  [ -- ] 在线更新           不可用（/v1 被 hosts 指到本机）
+  [ -- ] 在线更新           不可用（未接官方授权）
   [ OK ] 后门入口 /i5nyyoblvmcpuj71   HTTP 404
 ```
 
@@ -175,11 +168,11 @@ sudo make install
 
 ## 说明
 
-- 后门拦截只做**阻断**，命中即 404 + `zend_bailout()`，不输出任何内容。
-- 拦的是「函数名」，不是「类方法」——已不再拦函数，仅按 URI 拦这两条后门路由。
-- curl 应答替换只对 `apiv1.sukeyun.com` 的 `/ky/admin*` 生效，其余域名原样透传。
-- 不修改任何加密文件，也不改业务逻辑；授权标记与应答替换全部在运行时完成。
-- 这是**缓解手段**，不是根治。根治要打官方补丁或替换掉含后门的加密文件。
+- 干两件事：**解掉模板授权** + **封掉后门 URI**。
+- 授权靠运行时完成：写授权标记文件、替换 curl 应答、伪装 `curl_error` / `curl_getinfo`。
+- 后门按 URI 匹配，命中即 `404` + `zend_bailout()`，不输出任何内容。
+- 应答替换只针对 `apiv1.sukeyun.com` 的 `/ky/admin*`，其他域名原样透传。
+- 不改任何加密文件，也不改业务逻辑。
 - 仅限用于你自己拥有/运维的站点。
 
 

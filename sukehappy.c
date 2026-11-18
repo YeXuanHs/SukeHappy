@@ -1,40 +1,11 @@
 /*
- * sukehappy —— 速科模板授权本地化（PHP 7.4）v4.0.0
+ * sukehappy —— 速科模板授权本地化
  *
- * ============================================================================
- * v4 变化：不再需要本地 HTTP mock 服务
- * ============================================================================
- * v3 依赖「/etc/hosts 把 apiv1.sukeyun.com 指向 127.0.0.1 + Python HTTPS 服务
- * 返回授权 JSON」。v4 改成在扩展里直接改写 curl 的返回值：
+ * 1) 写授权标记文件，让 TemplateBaseController 的检查通过
+ * 2) hook curl_*，把授权接口的应答换成本地固定值
+ * 3) 拦两个后门 URI
  *
- *   hook curl_setopt → 只读记下每个句柄的 URL（不动参数槽，避免 UAF）
- *   hook curl_exec   → 先调原始 handler（否则句柄半初始化，libcurl 析构会崩），
- *                      再按 URL 覆盖 return_value
- *
- * hosts 里那条 127.0.0.1 保留，但 443 上不再监听 —— curl 会立刻
- * ECONNREFUSED（毫秒级），没有 TLS 握手、没有真实外网请求。
- *
- * ============================================================================
- * 为什么不 hook zend_execute_ex / 不能跳过原 handler
- * ============================================================================
- * 1) PHP 7.4 + ionCube + swoole_loader 下换 zend_execute_ex 会导致 worker
- *    持续 SIGSEGV（RSHUTDOWN 还原也没用，loader/ioncube 也在同一指针上叠加）。
- * 2) PHP 7 的 ICALL(fastcall) 路径绕过 zend_execute_internal / zend_execute_ex，
- *    所以只能换 zend_internal_function.handler。
- * 3) 跳过原 handler 会让 curl 句柄半初始化，析构时 libcurl 崩 → SIGSEGV 风暴。
- * 4) 改参数字符串要动引用计数，算错就是 use-after-free —— 所以这里只读不改。
- *
- * ============================================================================
- * 另外两个功能（v3 已有，保留）
- * ============================================================================
- * a) 写模板授权标记 —— 让 TemplateBaseController 的检查通过，页面才有内容
- * b) 拦后门 URI
- *
- * 授权标记：
- *   TemplateBaseController::__construct() 每请求检查 Cache("8ue6hpsuffpheaaj")，
- *   为空就 header 跳百度 + include common.php + exit（表现为 HTTP 200 但 body 0 字节）。
- *   路径 {站点根}/data/runtime/cahce/08/d84096246ac19a1f12adfa064bb0fa.php
- *   （08 = md5("8ue6hpsuffpheaaj") 前两位；cahce 是模板自己的拼写）
+ * 不要 hook zend_execute_ex（loader 会崩），也不要跳过原始 curl handler。
  */
 
 #include "php.h"
@@ -57,10 +28,10 @@
 
 /* CURLOPT_URL */
 #define SUKE_CURLOPT_URL 10002
-/* CURLINFO_HTTP_CODE = CURLINFO_LONG(0x200000) + 2 */
+/* CURLINFO_HTTP_CODE */
 #define SUKE_CURLINFO_HTTP_CODE 2097154
 
-/* 授权中心的应答，结构必须与真实响应一致 */
+/* 授权接口应答 */
 #define SUKE_BODY_TEMPLATE  "{\"code\":200,\"msg\":\"\"}"
 #define SUKE_BODY_BASE      "{\"code\":200,\"ki\":\"\",\"msg\":\"ok\"}"
 #define SUKE_BODY_VERIFY    "{\"code\":200,\"msg\":\"ok\"}"
@@ -75,7 +46,7 @@ static const char *suke_bad_uris[] = {
 static char suke_root_buf[1024];
 static char *suke_site_root = NULL;
 
-/* ---- 句柄 → URL 表（固定数组，不分配内存，跨请求复用） ---- */
+/* 句柄 → URL 表，固定数组，不分配内存 */
 #define SUKE_URL_MAX 64
 #define SUKE_URL_LEN 512
 static struct {
@@ -106,9 +77,7 @@ static void suke_log(const char *fmt, ...)
     fclose(fp);
 }
 
-/* ========================================================================= */
-/* URL 记录                                                                  */
-/* ========================================================================= */
+/* --- URL 记录 --- */
 
 static void *suke_handle_key(zval *z)
 {
@@ -165,9 +134,7 @@ static const char *suke_body_for(const char *url)
     return NULL;
 }
 
-/* ========================================================================= */
-/* hook 包装                                                                 */
-/* ========================================================================= */
+/* --- hook 包装 --- */
 
 static void suke_curl_setopt(INTERNAL_FUNCTION_PARAMETERS)
 {
@@ -233,11 +200,7 @@ static void suke_curl_exec(INTERNAL_FUNCTION_PARAMETERS)
     }
 }
 
-/* -------------------------------------------------------------------------
- * 模板的 Curlrequest() 除了看返回体，还会检查 curl_error() 和
- * curl_getinfo($ch, CURLINFO_HTTP_CODE)。真实请求是 fail 的（连接被拒），
- * 所以这三样也要一并伪装成功，否则会走到 "CURL ERROR:..." 分支。
- * ---------------------------------------------------------------------- */
+/* 模板还会看 curl_error / curl_getinfo，一并伪装成功，否则走 CURL ERROR 分支 */
 static void suke_curl_error(INTERNAL_FUNCTION_PARAMETERS)
 {
     zval *zch = (ZEND_CALL_NUM_ARGS(execute_data) >= 1)
@@ -282,7 +245,6 @@ static void suke_curl_getinfo(INTERNAL_FUNCTION_PARAMETERS)
         suke_orig_curl_getinfo(INTERNAL_FUNCTION_PARAM_PASSTHRU);
     }
 
-    /* CURLINFO_HTTP_CODE = 2097154 */
     if (url && suke_body_for(url)
         && zopt && Z_TYPE_P(zopt) == IS_LONG
         && Z_LVAL_P(zopt) == SUKE_CURLINFO_HTTP_CODE) {
@@ -291,14 +253,11 @@ static void suke_curl_getinfo(INTERNAL_FUNCTION_PARAMETERS)
     }
 }
 
-/* ========================================================================= */
-/* 安装 hook                                                                 */
-/* ========================================================================= */
+/* --- 安装 hook --- */
 static zend_internal_function *suke_find_func(const char *name, size_t len)
 {
     zend_function *fn;
 
-    /* 函数表里存的是 zend_function 指针 */
     fn = (zend_function *) zend_hash_str_find_ptr(CG(function_table), name, len);
     if (!fn) {
         fn = (zend_function *) zend_hash_str_find_ptr(EG(function_table), name, len);
@@ -359,9 +318,7 @@ static void suke_install_hooks(void)
     }
 }
 
-/* ========================================================================= */
-/* 站点根 / 授权标记 / 后门                                                  */
-/* ========================================================================= */
+/* --- 站点根 / 授权标记 / 后门 --- */
 
 static void suke_init_root(void)
 {
@@ -449,9 +406,7 @@ static void suke_write_auth_mark(void)
     suke_log("[sukehappy] 已写授权标记: %s\n", path);
 }
 
-/* ========================================================================= */
-/* 模块入口                                                                  */
-/* ========================================================================= */
+/* --- 模块入口 --- */
 
 PHP_MINIT_FUNCTION(sukehappy)
 {
@@ -487,7 +442,7 @@ PHP_RINIT_FUNCTION(sukehappy)
 PHP_MINFO_FUNCTION(sukehappy)
 {
     php_info_print_table_start();
-    php_info_print_table_row(2, "sukehappy", "速科模板授权本地化 v4（curl 返回值注入）");
+    php_info_print_table_row(2, "sukehappy", "速科模板授权本地化");
     php_info_print_table_row(2, "site_root", suke_site_root ? suke_site_root : "(未初始化)");
     php_info_print_table_row(2, "hook curl_exec", suke_orig_curl_exec ? "on" : "off");
     php_info_print_table_row(2, "hook curl_setopt", suke_orig_curl_setopt ? "on" : "off");
@@ -507,7 +462,7 @@ zend_module_entry sukehappy_module_entry = {
     PHP_RINIT(sukehappy),
     NULL,
     PHP_MINFO(sukehappy),
-    "4.0.0",
+    "1.1.0",
     STANDARD_MODULE_PROPERTIES
 };
 
