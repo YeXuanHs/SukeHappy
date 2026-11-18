@@ -214,15 +214,6 @@
           }
         },
         {
-          "path": "/pagecontent/trusteeship",
-          "name": "pagecontent_trusteeship",
-          "component": "pagecontent/trusteeship/index",
-          "meta": {
-            "title": "托管",
-            "icon": "ElIconCpu"
-          }
-        },
-        {
           "path": "/pagecontent/webmaster",
           "name": "pagecontent_webmaster",
           "component": "pagecontent/webmaster/index",
@@ -413,15 +404,6 @@
           "redirect": "/foreground/custom/data",
           "children": [
             {
-              "path": "/foreground/custom/data",
-              "name": "foreground_custom_data",
-              "component": "Foreground/Customdata/index",
-              "meta": {
-                "title": "自定义数据",
-                "icon": "ElIconFiles"
-              }
-            },
-            {
               "path": "/foreground/custom/fields",
               "name": "foreground_custom_fields",
               "component": "Foreground/Customfields/index",
@@ -504,15 +486,6 @@
           "meta": {
             "title": "编辑活动",
             "icon": "ElIconEdit"
-          }
-        },
-        {
-          "path": "/event/module",
-          "name": "event_module",
-          "component": "EventManagement/Moduleeditor/index",
-          "meta": {
-            "title": "模块编辑",
-            "icon": "ElIconBox"
           }
         }
       ]
