@@ -86,28 +86,61 @@ function check_token($authcode = '')
 
 
 /* ---------- 登录信息（首页欢迎卡用） ---------- */
-function suke_user_info(PDO $pdo, $pf, $user, $token, $msg = '')
+
+/* 上一次登录：直接读魔方自己的登录日志表 <prefix>admin_log */
+function suke_prev_login(PDO $pdo, $pf, $user)
 {
+    try {
+        $st = $pdo->prepare("SELECT logintime, ipaddress FROM {$pf}admin_log WHERE admin_username = ? ORDER BY id DESC LIMIT 1");
+        $st->execute([$user]);
+        $row = $st->fetch();
+        return $row ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+/* 本次登录写一条日志（表结构同魔方后台「操作日志」） */
+function suke_note_login(PDO $pdo, $pf, $user)
+{
+    $ip = suke_client_ip();
+    try {
+        $st = $pdo->prepare("INSERT INTO {$pf}admin_log
+            (admin_username, logintime, logouttime, ipaddress, sessionid, lastvisit, port)
+            VALUES (?, ?, 0, ?, ?, ?, ?)");
+        $st->execute([
+            $user,
+            time(),
+            $ip,
+            session_id() ?: bin2hex(random_bytes(16)),
+            time(),
+            isset($_SERVER['REMOTE_PORT']) ? $_SERVER['REMOTE_PORT'] : '',
+        ]);
+    } catch (Throwable $e) {
+    }
+    return $ip;
+}
+
+function suke_user_info(PDO $pdo, $pf, $user, $token)
+{
+    $prev = suke_prev_login($pdo, $pf, $user);
+    $pip  = $prev && !empty($prev['ipaddress']) ? $prev['ipaddress'] : '';
+
+    $loc = '';
+    if ($pip !== '') {
+        $loc = suke_ip_region($pip);
+    }
+
     return [
         'user_token'    => $token,
         'username'      => $user,
         'nickname'      => $user,
         'email'         => cfg_get($pdo, $pf, 'mb_admin_email') ?: $user,
         'avatar'        => suke_letter_avatar($user),
-        'last_login'    => cfg_get($pdo, $pf, 'mb_admin_last_login') ?: '首次登录',
-        'last_login_ip' => cfg_get($pdo, $pf, 'mb_admin_last_ip') ?: '—',
-        'location'      => cfg_get($pdo, $pf, 'mb_admin_last_loc') ?: '—',
+        'last_login'    => $prev ? date('Y-m-d H:i:s', (int) $prev['logintime']) : '首次登录',
+        'last_login_ip' => $pip !== '' ? $pip : '—',
+        'location'      => $loc !== '' ? $loc : '—',
     ];
-}
-
-/* 记下本次登录，下次登录时给欢迎卡显示 */
-function suke_note_login(PDO $pdo, $pf)
-{
-    $ip  = suke_client_ip();
-    $loc = suke_ip_region($ip);
-    cfg_set($pdo, $pf, 'mb_admin_last_login', date('Y-m-d H:i:s'), '最近登录时间');
-    cfg_set($pdo, $pf, 'mb_admin_last_ip', $ip, '最近登录IP');
-    cfg_set($pdo, $pf, 'mb_admin_last_loc', $loc, '最近登录地点');
 }
 
 /* ---------- 账号状态 ---------- */

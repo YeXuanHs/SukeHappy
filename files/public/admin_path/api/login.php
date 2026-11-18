@@ -27,7 +27,7 @@ if (!$hasAccount) {
     $token = suke_issue_token($user);
     setcookie('mdy_mb_token', $token, time() + SUKE_JWT_TTL, '/', '', false, true);
     $uinfo = suke_user_info($pdo, $pf, $user, $token);
-    suke_note_login($pdo, $pf);
+    suke_note_login($pdo, $pf, $user);
     jout(200, [
         'token'  => $token,
         'expire' => SUKE_JWT_TTL,
@@ -52,7 +52,7 @@ if (!password_verify($pass, $adminPass)) {
 $token = suke_issue_token($user);
 setcookie('mdy_mb_token', $token, time() + SUKE_JWT_TTL, '/', '', false, true);
 $uinfo = suke_user_info($pdo, $pf, $user, $token);
-suke_note_login($pdo, $pf);
+suke_note_login($pdo, $pf, $user);
 jout(200, [
     'token'  => $token,
     'expire' => SUKE_JWT_TTL,
