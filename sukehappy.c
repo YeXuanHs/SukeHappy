@@ -29,7 +29,7 @@
 
 /* 授权接口伪造 */
 #define SUKE_BODY_TEMPLATE  "{\"code\":200,\"msg\":\"\"}"
-#define SUKE_BODY_BASE      "{\"code\":200,\"ki\":\"\",\"msg\":\"ok\"}"
+#define SUKE_BODY_BASE      "{\"code\":200,\"ki\":\"k7Qm2Xp9Za4Lr8Tn6Vc3Wd1Yb5Hs0Jg_\",\"msg\":\"ok\"}"
 #define SUKE_BODY_VERIFY    "{\"code\":200,\"msg\":\"ok\"}"
 #define SUKE_BODY_VERSION   "{\"code\":200,\"msg\":\"ok\",\"status\":200," \
                             "\"data\":{\"version\":\"1.0.7.6\",\"status\":200}}"

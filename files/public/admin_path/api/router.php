@@ -17,6 +17,8 @@
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 
+require __DIR__ . '/jwt.php';
+
 $ROOT = dirname(__DIR__, 3);                 // public/mbadmin/api -> 站点根
 $cfg  = require $ROOT . '/app/config/database.php';
 $pf   = $cfg['prefix'] ?? 'shd_';
@@ -67,24 +69,18 @@ function cfg_set(PDO $pdo, $pf, $label, $value, $desc = '', $type = 'admin') {
 }
 
 /* ---------- 会话（HMAC 签名 cookie，不依赖 PHP session） ---------- */
-function make_token($user, $authcode) {
-    $exp = time() + 86400 * 7;
-    $payload = $user . '|' . $exp;
-    $sig = hash_hmac('sha256', $payload, $authcode);
-    return base64_encode($payload . '|' . $sig);
+function make_token($user, $authcode = '')
+{
+    return suke_issue_token($user);
 }
 
-function check_token($authcode) {
+function check_token($authcode = '')
+{
     $raw = $_COOKIE['mdy_mb_token'] ?? '';
     if (!$raw) return null;
-    $dec = base64_decode($raw, true);
-    if (!$dec) return null;
-    $parts = explode('|', $dec);
-    if (count($parts) !== 3) return null;
-    list($user, $exp, $sig) = $parts;
-    if ((int)$exp < time()) return null;
-    if (!hash_equals(hash_hmac('sha256', $user . '|' . $exp, $authcode), $sig)) return null;
-    return $user;
+    $claims = suke_jwt_verify($raw);
+    if (!$claims) return null;
+    return $claims['username'] ?? ($claims['sub'] ?? null);
 }
 
 /* ---------- 账号状态 ---------- */
@@ -166,45 +162,9 @@ if (strpos($lower, 'mymenus') !== false) {
     jout(200, ['menu' => [], 'permissions' => ['*/*/*']], 'success');
 }
 
-/* 4) 登录 / 首次创建 */
+/* 4) 登录 / 首次创建：交给 api/login.php */
 if (strpos($lower, 'login') !== false) {
-    $user = trim((string)($body['username'] ?? $body['user'] ?? $body['email'] ?? $body['account'] ?? ''));
-    $pass = (string)($body['password'] ?? $body['pass'] ?? '');
-
-    if ($user === '' || $pass === '') {
-        jout(400, null, '请输入账号和密码');
-    }
-
-    if (!$hasAccount) {
-        /* 首次：直接创建管理员（长度下限 6） */
-        if (strlen($pass) < 6) {
-            jout(400, null, '密码至少 6 位');
-        }
-        cfg_set($pdo, $pf, 'mb_admin_user', $user, '后台管理员账号');
-        cfg_set($pdo, $pf, 'mb_admin_pass', password_hash($pass, PASSWORD_DEFAULT), '后台管理员密码哈希');
-        if (strpos($user, '@') !== false) {
-            cfg_set($pdo, $pf, 'mb_admin_email', $user, '后台管理员邮箱');
-        }
-        setcookie('mdy_mb_token', make_token($user, $authcode), time() + 86400 * 7, '/', '', false, true);
-        jout(200, [
-            'token' => $user, 'expire' => 518400,
-            'userInfo' => ['user_token' => $user, 'username' => $user, 'email' => $user, 'nickname' => $user],
-        ], '管理员账号已创建');
-    }
-
-    /* 正常登录 */
-    if ($user !== $adminUser) {
-        jout(400, null, '账号或密码错误');
-    }
-    if (!password_verify($pass, $adminPass)) {
-        jout(400, null, '账号或密码错误');
-    }
-    setcookie('mdy_mb_token', make_token($user, $authcode), time() + 86400 * 7, '/', '', false, true);
-    jout(200, [
-        'token' => $user, 'expire' => 518400,
-        'userInfo' => ['user_token' => $user, 'username' => $user,
-                       'email' => cfg_get($pdo, $pf, 'mb_admin_email') ?: $user, 'nickname' => $user],
-    ], 'success');
+    require __DIR__ . '/login.php';
 }
 
 /* 5) 登出 */
