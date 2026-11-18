@@ -103,11 +103,11 @@ env[SUKE_SITE_ROOT] = /www/wwwroot/你的站点
 |---|---|---|
 | `app` | `app.b4f684d3.js`（厂商新版 + 我们的补丁） | 入口 |
 | `layout` | `layout.8f3a26d1.js` | 7225 |
-| `scuiChunks` | `scuiChunks.c95e07b4.js` | 6325 |
+| `scuiChunks` | `scuiChunks.4d1f8b62.js`（模块级三方合并） | 6325 |
 | `home-widgets` | `home-widgets.6c1a2f9e.js` | 5642 |
 | `Foreground-Global` | `Foreground-Global.e2d84f60.js` | 1639 |
-| `Foreground-Htmledit` | `Foreground-Htmledit.c9a4f1b7.js` | 7435 |
-| `plugins-globalFile` | `plugins-globalFile.e5b8c260.js` | 5718 |
+| `Foreground-Htmledit` | `Foreground-Htmledit.c1a94d27.js` | 7435 |
+| `plugins-globalFile` | `plugins-globalFile.d3f26b08.js` | 5718 |
 
 改内容的流程：**换一个新的 8 位 hash** → 文件名跟着换 → 改 `app.js` 里对应 id 的 hash →
 `index.html` 的 `app.js?v=N` 加一。旧文件在服务器上 `mv` 到 `/root/bak-js-YYYYMMDD/`
