@@ -94,6 +94,24 @@ env[SUKE_SITE_ROOT] = /www/wwwroot/你的站点
 | `login.php` | 账号校验 + 首装建管理员 + 签发 JWT；`userInfo.user_token` 也返回 JWT |
 | `router.php` | 只做分发，`login` 分支 `require` 上面的 `login.php` |
 
+## 后台补丁文件命名（重要）
+
+`files/public/admin_path/js/` 里**只放被 `app.js` 引用的那一份**，命名沿用速科原包的
+`<chunk名>.<8位hash>.js`，不要用 `k2/k3/kk` 这种临时名，也不要留历史版本：
+
+| chunk | 文件 | app.js 里的 id |
+|---|---|---|
+| `layout` | `layout.8f3a26d1.js` | 7225 |
+| `scuiChunks` | `scuiChunks.c95e07b4.js` | 6325 |
+| `home-widgets` | `home-widgets.6c1a2f9e.js` | 5642 |
+| `Foreground-Global` | `Foreground-Global.e2d84f60.js` | 1639 |
+| `Foreground-Htmledit` | `Foreground-Htmledit.c9a4f1b7.js` | 7435 |
+| `plugins-globalFile` | `plugins-globalFile.e5b8c260.js` | 5718 |
+
+改内容的流程：**换一个新的 8 位 hash** → 文件名跟着换 → 改 `app.js` 里对应 id 的 hash →
+`index.html` 的 `app.js?v=N` 加一。旧文件在服务器上 `mv` 到 `/root/bak-js-YYYYMMDD/`
+（别直接删，留回滚），仓库里直接删（git 有历史）。
+
 ## 安装
 
 安装分两步：**装扩展** + **覆盖 `files/` 里的文件**。只装扩展，后台和前台的那部分改动不会生效。
