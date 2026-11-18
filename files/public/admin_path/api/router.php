@@ -123,13 +123,17 @@ function suke_note_login(PDO $pdo, $pf, $user)
 
 function suke_user_info(PDO $pdo, $pf, $user, $token)
 {
+    /*
+     * 三个字段的含义（按模板前端「上次登陆：X，登录IP：Y，登录地点：Z」的顺序）：
+     *   last_login    = 上次登录的 IP
+     *   last_login_ip = 本次登录的 IP
+     *   location      = 本次登录 IP 的归属地
+     */
     $prev = suke_prev_login($pdo, $pf, $user);
     $pip  = $prev && !empty($prev['ipaddress']) ? $prev['ipaddress'] : '';
 
-    $loc = '';
-    if ($pip !== '') {
-        $loc = suke_ip_region($pip);
-    }
+    $cur    = suke_client_ip();
+    $curLoc = $cur !== '' ? suke_ip_region($cur) : '';
 
     return [
         'user_token'    => $token,
@@ -137,9 +141,9 @@ function suke_user_info(PDO $pdo, $pf, $user, $token)
         'nickname'      => $user,
         'email'         => cfg_get($pdo, $pf, 'mb_admin_email') ?: $user,
         'avatar'        => suke_letter_avatar($user),
-        'last_login'    => $prev ? date('Y-m-d H:i:s', (int) $prev['logintime']) : '首次登录',
-        'last_login_ip' => $pip !== '' ? $pip : '—',
-        'location'      => $loc !== '' ? $loc : '—',
+        'last_login'    => $pip !== '' ? $pip : '首次登录',
+        'last_login_ip' => $cur !== '' ? $cur : '—',
+        'location'      => $curLoc !== '' ? $curLoc : '—',
     ];
 }
 
