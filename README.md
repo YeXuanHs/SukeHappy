@@ -264,6 +264,12 @@ sudo make install
 - 头像改为首字母头像（内联 SVG data URI，蓝底白字），不再用 `/static/images/avatar.jpg`（那是魔方 logo）
 - 菜单再精简：移除 用户空间 / 客服 / 反馈 / 盗版举报；头像下拉去掉「帐号信息」
 - 仪表盘去掉「版本信息」「版本发布日志」两张卡，栅格调成 2×2 + 整行
+- 修「产品内容」(`/product/type/content`) 一打开就卡死：接口 `content` 返回字符串 `"[]"`，
+  弹窗 `setData()` 直接 `this.form = e.content`，`form` 变成字符串，渲染时往字符上写属性 →
+  严格模式每次渲染抛 TypeError → Vue 反复重渲染把页面卡死。
+  现在在 `scuiChunks` 里统一 `JSON.parse` 成数组（非数组退化为 `[]`）
+- 修「退出登录」点了没反应：原实现只 `router.replace(/login)` 没清 token，被路由守卫弹回
+- 「安全码验证」保留，文案改为「密码」（HTML 编辑 / 全局文件两处）
 
 ### 1.2.0
 
