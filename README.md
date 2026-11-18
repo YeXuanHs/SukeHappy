@@ -101,6 +101,7 @@ env[SUKE_SITE_ROOT] = /www/wwwroot/你的站点
 
 | chunk | 文件 | app.js 里的 id |
 |---|---|---|
+| `app` | `app.b4f684d3.js`（厂商新版 + 我们的补丁） | 入口 |
 | `layout` | `layout.8f3a26d1.js` | 7225 |
 | `scuiChunks` | `scuiChunks.c95e07b4.js` | 6325 |
 | `home-widgets` | `home-widgets.6c1a2f9e.js` | 5642 |
@@ -282,6 +283,9 @@ sudo make install
     与「监控 → 地区」同源，格式一致：`中国福建省莆田市[电信]`
 - 头像改为首字母头像（内联 SVG data URI，蓝底白字），不再用 `/static/images/avatar.jpg`（那是魔方 logo）
 - 菜单再精简：移除 用户空间 / 客服 / 反馈 / 盗版举报；头像下拉去掉「帐号信息」
+- **后台升级到厂商 1.0.7.9.2 前端**（`suke` 改名，仍放 `mbadmin`）：
+  `app.b4f684d3` / `scuiChunks.13d27730` / `Foreground-Htmledit.efd5e0ee` / `plugins-WeChat.df02826a` / `Foreground-Aboutus-aboutusset.3426004c`
+  —— 其中 app 与 scuiChunks、Htmledit 三个已重打我们的补丁（menu.json、产品内容 form 解析、安全码→密码）
 - **修路由大小写**：厂商前端内部跳转用的是组件目录名（`/EventManagement/*`、`/ArticleList/*`、`/Foreground/Global`），菜单却写成小写（`/event/*`、`/article/*`、`/foreground/global`），路由没注册 → 点「编辑」白屏。menu.json 里 9 条路径已改成厂商写法
 - 再移除三个**厂商空壳页**（chunk 只有 384~385 字节，`render` 只返回一个空 `div`）：
   「页面内容 → 托管」「前台设置 → 自定义 → 自定义数据」「活动管理 → 模块编辑」
