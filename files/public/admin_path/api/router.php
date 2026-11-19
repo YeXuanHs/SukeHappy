@@ -209,6 +209,51 @@ if (strpos($lower, 'safecode') !== false) {
     jout(200, '密码验证成功，过期时间为1小时', 'success');
 }
 
+/* 1.6) 授权查询：透传速科官方检测接口
+ *   原实现走 /localadmin33/VersionInformation/queryAuthorization，本机没有该服务，
+ *   于是前端拿到 {code:200,data:[],message:""} → 永远显示“有授权”。
+ *   真实接口：GET https://apiv1.sukeyun.com/ky/admin/template?url=<域名>&v=cx
+ *     已授权 → {code:200, msg:"<加密授权载荷>"}
+ *     未授权 → {code:400, msg:"快云科技模板提示：该站点未授权…"}
+ *   前端约定：code=200 → 绿色✓（data 为提示文案）；code=201 → 红色（data 为原因） */
+if (strpos($lower, 'queryauthorization') !== false) {
+    $dom = trim((string) ($body['data'] ?? $body['url'] ?? ($_GET['data'] ?? $_GET['url'] ?? '')));
+    $dom = preg_replace('#^https?://#i', '', $dom);
+    $dom = rtrim($dom, '/');
+    if ($dom === '' || !preg_match('#^[A-Za-z0-9\-\.]+\.[A-Za-z]{2,}$#', $dom)) {
+        jout(201, '请输入正确的域名（例如 example.com）', 'error');
+    }
+
+    /* 注意：本机加载了 sukehappy.so，它会劫持 curl 发往 apiv1.sukeyun.com 的请求，
+       固定返回 {"code":200,"msg":""}（作者自己的 mock）。用 file_get_contents 绕开，
+       才能拿到速科官方的真实授权结果。 */
+    $api = 'https://apiv1.sukeyun.com/ky/admin/template?url=' . $dom . '&v=cx';
+    $ctx = stream_context_create([
+        'http' => [
+            'method'        => 'GET',
+            'timeout'       => 15,
+            'ignore_errors' => true,
+            'header'        => "User-Agent: Mozilla/5.0\r\nAccept: application/json\r\n",
+        ],
+        'ssl'  => ['verify_peer' => false, 'verify_peer_name' => false],
+    ]);
+    $raw = @file_get_contents($api, false, $ctx);
+    if (!is_string($raw) || trim($raw) === '') {
+        jout(201, '查询失败：无法连接授权服务器', 'error');
+    }
+
+    $j = json_decode((string) $raw, true);
+    if (!is_array($j) || !isset($j['code'])) {
+        jout(201, '查询失败：接口返回异常', 'error');
+    }
+
+    if ((int) $j['code'] === 200 && !empty($j['msg'])) {
+        jout(200, '域名 ' . $dom . ' 已通过官方授权', 'success');
+    }
+    $msg = isset($j['msg']) && $j['msg'] !== '' ? (string) $j['msg'] : '该域名未授权';
+    jout(201, $msg, 'error');
+}
+
 /* 2) 会话校验（页面加载时调用） */
 if (strpos($lower, 'verify') !== false) {
     $u = check_token($authcode);
