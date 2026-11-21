@@ -102,12 +102,12 @@ env[SUKE_SITE_ROOT] = /www/wwwroot/你的站点
 | chunk | 文件 | app.js 里的 id |
 |---|---|---|
 | `app` | `app.b4f684d3.js`（厂商新版 + 我们的补丁） | 入口 |
-| `layout` | `layout.8f3a26d1.js` | 7225 |
-| `scuiChunks` | `scuiChunks.4d1f8b62.js`（模块级三方合并） | 6325 |
-| `home-widgets` | `home-widgets.6c1a2f9e.js` | 5642 |
-| `Foreground-Global` | `Foreground-Global.e2d84f60.js` | 1639 |
-| `Foreground-Htmledit` | `Foreground-Htmledit.c1a94d27.js` | 7435 |
-| `plugins-globalFile` | `plugins-globalFile.d3f26b08.js` | 5718 |
+| `layout` | `layout.3d148702.js` | 7225 |
+| `scuiChunks` | `scuiChunks.13d27730.js` | 6325 |
+| `home-widgets` | `home-widgets.9446c053.js` | 5642 |
+| `Foreground-Global` | `Foreground-Global.0192faea.js` | 1639 |
+| `Foreground-Htmledit` | `Foreground-Htmledit.efd5e0ee.js` | 7435 |
+| `plugins-globalFile` | `plugins-globalFile.2a758939.js` | 5718 |
 
 改内容的流程：**换一个新的 8 位 hash** → 文件名跟着换 → 改 `app.js` 里对应 id 的 hash →
 `index.html` 的 `app.js?v=N` 加一。旧文件在服务器上 `mv` 到 `/root/bak-js-YYYYMMDD/`
@@ -288,6 +288,8 @@ sudo make install
 - **后台升级到厂商 1.0.7.9.2 前端**（`suke` 改名，仍放 `mbadmin`）：
   `app.b4f684d3` / `scuiChunks.13d27730` / `Foreground-Htmledit.efd5e0ee` / `plugins-WeChat.df02826a` / `Foreground-Aboutus-aboutusset.3426004c`
   —— 其中 app 与 scuiChunks、Htmledit 三个已重打我们的补丁（menu.json、产品内容 form 解析、安全码→密码）
+- **文件名用官方 hash（可直接整目录覆盖）**：被我们改过的 chunk 沿用官方文件名（`layout.3d148702.js`、`scuiChunks.13d27730.js`、`Foreground-Htmledit.efd5e0ee.js`、`Foreground-Global.0192faea.js`、`home-widgets.9446c053.js`、`plugins-globalFile.2a758939.js`、`authorization-cx.a2c0e944.js`、`login.69e3f7f1.js`），`app.js` 里的映射表与原版完全一致 —— 用户把 `js/` `css/` `api/` `index.html` 覆盖过去就能用，不用改任何 hash
+- **不硬编码后台目录名**：接口基址在 `app.js` 开头由 `window.__SUKE_API_BASE` 从自身 `<script src>` 反推（`/suke/js/app.xxx.js` → `/suke`），`layout.js`、`scuiChunks.js` 复用它。所以后台目录叫 `mbadmin` / `suke` / 任意名字都能用
 - **修路由大小写**：厂商前端内部跳转用的是组件目录名（`/EventManagement/*`、`/ArticleList/*`、`/Foreground/Global`），菜单却写成小写（`/event/*`、`/article/*`、`/foreground/global`），路由没注册 → 点「编辑」白屏。menu.json 里 9 条路径已改成厂商写法
 - 再移除三个**厂商空壳页**（chunk 只有 384~385 字节，`render` 只返回一个空 `div`）：
   「页面内容 → 托管」「前台设置 → 自定义 → 自定义数据」「活动管理 → 模块编辑」

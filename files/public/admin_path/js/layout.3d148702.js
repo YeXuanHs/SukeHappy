@@ -5,7 +5,7 @@
   if (window.__skyPatched) return;
   window.__skyPatched = 1;
 
-  var API_BASE = '/mbadmin/api/router.php';
+  var API_BASE = (window.__SUKE_API_BASE||'') + '/api/router.php';
 
   var LOCK_SVG = '<svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"'
     + ' stroke="currentColor" class="arco-icon arco-icon-lock" stroke-width="4"'
